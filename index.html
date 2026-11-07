@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Centrale 118 · Secours Suisse</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand"><span class="cross">✚</span> Centrale <b>Secours Suisse</b></div>
+    <div id="hud" hidden>
+      <span id="hud-canton"></span>
+      <span id="hud-money"></span>
+      <span id="hud-clock"></span>
+      <span class="speed" role="group" aria-label="Vitesse du jeu">
+        <button data-speed="0" title="Pause">⏸</button>
+        <button data-speed="1">1×</button>
+        <button data-speed="3">3×</button>
+        <button data-speed="10">10×</button>
+        <button data-speed="30">30×</button>
+      </span>
+    </div>
+  </header>
+
+  <main>
+    <div id="map"></div>
+    <aside id="panel"></aside>
+  </main>
+
+  <div id="toasts" aria-live="polite"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -27,7 +27,11 @@ calcul d'itinéraires OSRM.
 - **Revendiquer un canton** : la carte se centre dessus, le reste est grisé.
 - Construction de bâtiments (clic sur la carte, uniquement dans ton canton, pas dans les lacs),
   nommés d'après la commune la plus proche (2 175 communes réelles).
-- Achat de véhicules : tonne-pompe, camion-échelle, ambulance, SMUR, patrouille.
+- Achat de véhicules : 8 véhicules pompiers (TP, VPI, échelle, citerne feux de forêt, sauvetage routier,
+  chimique, commandement, transport de personnel), ambulance, SMUR, patrouille.
+- Si les moyens sont insuffisants, les équipes sur place travaillent quand même (plus lentement,
+  récompense réduite) : les appels ne restent jamais bloqués.
+- Mode bac à sable : boutons pour ajouter de l'argent (onglet Construire).
 - Appels aléatoires dans la zone couverte par tes bâtiments, avec adresse (rue réelle + commune).
 - Alarme avec proposition automatique des véhicules les plus proches, trajets animés sur les
   vraies routes (durée OSRM × 0.75 en urgence), travail sur place, retour en caserne.

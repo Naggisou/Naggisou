@@ -458,9 +458,12 @@ function recall(vid) {
   if (i) {
     i.assigned = i.assigned.filter((x) => x !== vid);
     if (!i.assigned.length && i.status === "engage") i.status = "nouveau";
-    if (i.status === "travail" && !G.requirementsMetOnScene(state, i)) {
-      i.status = "engage";
-      i.workEnd = null;
+    if (i.status === "travail") {
+      const cov = G.coverageOnScene(state, i);
+      if (cov <= 0) {
+        i.status = i.assigned.length ? "engage" : "nouveau";
+        i.workEnd = null;
+      } else i.coverage = Math.min(i.coverage ?? 1, cov);
     }
     refreshIncidentMarker(i);
   }
@@ -476,17 +479,30 @@ function removeIncident(i) {
   dirty = true;
 }
 
+function startWork(i, coverage) {
+  const t = G.incidentType(i.typeId);
+  i.status = "travail";
+  i.coverage = coverage;
+  // ex. moitié des moyens -> 2× plus long
+  i.workEnd = state.time + G.rand(t.work) * (1 + (1 - coverage) * 2);
+  refreshIncidentMarker(i);
+  if (coverage < 1) toast(`⚠ ${t.label} : intervention avec moyens insuffisants (plus lente, récompense réduite).`, "warn");
+  dirty = true;
+}
+
 function completeIncident(i) {
   const t = G.incidentType(i.typeId);
-  state.money += t.reward;
+  const coverage = i.coverage ?? 1;
+  const reward = Math.round((t.reward * (0.4 + 0.6 * coverage)) / 100) * 100;
+  state.money += reward;
   state.stats.done++;
-  state.stats.earned += t.reward;
+  state.stats.earned += reward;
   for (const vid of i.assigned) {
     const v = vehicle(vid);
     if (v && v.incidentId === i.id) sendHome(v);
   }
   removeIncident(i);
-  toast(`✔ ${t.label} (${i.address}) terminé : +${G.formatMoney(t.reward)}`, "ok");
+  toast(`✔ ${t.label} (${i.address}) terminé : +${G.formatMoney(reward)}`, "ok");
   G.save(state);
 }
 
@@ -551,9 +567,17 @@ function step() {
   }
 
   for (const i of [...state.incidents]) {
+    const t = G.incidentType(i.typeId);
     if (i.status === "engage" && G.requirementsMetOnScene(state, i)) {
-      i.status = "travail";
-      i.workEnd = state.time + G.rand(G.incidentType(i.typeId).work);
+      startWork(i, 1);
+    } else if (i.status === "engage" && G.nobodyEnRoute(state, i) && G.coverageOnScene(state, i) > 0) {
+      // Moyens insuffisants mais plus personne en approche : on travaille quand même,
+      // plus lentement et pour une récompense réduite (l'appel ne bloque plus la partie).
+      startWork(i, G.coverageOnScene(state, i));
+    } else if (i.status === "travail" && i.coverage < 1 && G.requirementsMetOnScene(state, i)) {
+      // Les renforts sont arrivés : on repasse en régime normal
+      i.coverage = 1;
+      i.workEnd = Math.min(i.workEnd, state.time + G.rand(t.work) * 0.5);
       refreshIncidentMarker(i);
       dirty = true;
     } else if (i.status === "travail" && state.time >= i.workEnd) {
@@ -721,6 +745,12 @@ function tabBuild() {
       <div class="stat"><b>${state.stats.done}</b><span>interventions réussies</span></div>
       <div class="stat"><b>${state.stats.missed}</b><span>appels perdus</span></div>
     </div>
+    <h3>Mode bac à sable</h3>
+    <div class="actions">
+      <button class="btn sm" data-action="cheat" data-amount="10000">+10 000 CHF</button>
+      <button class="btn sm" data-action="cheat" data-amount="100000">+100 000 CHF</button>
+      <button class="btn sm" data-action="cheat" data-amount="1000000">+1 000 000 CHF</button>
+    </div>
     <hr />
     <button class="btn sm" data-action="reset">Abandonner et changer de canton</button>`;
 }
@@ -731,8 +761,13 @@ function renderStation(s) {
   const buy = Object.entries(G.VEHICLE_TYPES)
     .filter(([, vt]) => vt.category === s.type)
     .map(
-      ([id, vt]) => `<button class="btn sm" data-action="buy" data-station="${s.id}" data-id="${id}"
-        ${state.money < vt.cost || vs.length >= t.capacity ? "disabled" : ""}>+ ${vt.label} · ${G.formatMoney(vt.cost)}</button>`,
+      ([id, vt]) => `<div class="item" style="cursor:default">
+        <span class="badge">${vt.short}</span>
+        <span class="grow"><span class="title">${vt.label}</span>
+        <span class="sub">${G.formatMoney(vt.cost)} · ${state.vehicles.filter((v) => v.stationId === s.id && v.type === id).length} en caserne</span></span>
+        <button class="btn sm" data-action="buy" data-station="${s.id}" data-id="${id}"
+          ${state.money < vt.cost || vs.length >= t.capacity ? "disabled" : ""}>Acheter</button>
+      </div>`,
     )
     .join("");
   $panel.innerHTML = `
@@ -741,20 +776,25 @@ function renderStation(s) {
     <div class="muted">${t.label} · ${vs.length}/${t.capacity} places</div>
     <h3>Véhicules</h3>
     <div class="list">${vs.map((v) => vehicleRow(v)).join("")}</div>
-    <h3>Acheter</h3>
-    <div class="actions">${buy}</div>`;
+    <h3>Acheter un véhicule</h3>
+    ${vs.length >= t.capacity ? `<div class="hint">Caserne pleine : construis-en une autre.</div>` : ""}
+    <div class="list">${buy}</div>`;
   updateLive();
 }
 
 function renderIncident(i) {
   const t = G.incidentType(i.typeId);
   const assigned = i.assigned.map(vehicle).filter(Boolean);
-  const onScene = (type) => assigned.filter((v) => v.type === type && v.status === "place").length;
-  const engaged = (type) => assigned.filter((v) => v.type === type).length;
+  const missEngaged = G.missingUnits(state, i);
+  const missScene = G.missingOnScene(state, i);
   const needs = Object.entries(t.need)
     .map(([type, n]) => {
-      const ok = onScene(type) >= n;
-      return `<span class="${ok ? "ok" : ""}">${n}× ${G.VEHICLE_TYPES[type].label} — ${engaged(type)} engagé(s), ${onScene(type)} sur place</span>`;
+      const scene = n - (missScene[type] ?? 0);
+      const engaged = n - (missEngaged[type] ?? 0);
+      const alt = G.ALTERNATES[type]?.length
+        ? ` <span class="muted">(ou ${G.ALTERNATES[type].map((a) => G.VEHICLE_TYPES[a].short).join("/")})</span>`
+        : "";
+      return `<span class="${scene >= n ? "ok" : ""}">${n}× ${G.VEHICLE_TYPES[type].label}${alt} — ${engaged} engagé(s), ${scene} sur place</span>`;
     })
     .join("");
 
@@ -768,12 +808,23 @@ function renderIncident(i) {
   if (ui.checkedFor !== i.id || !ui.checked) {
     ui.checkedFor = i.id;
     ui.checked = new Set();
+    // 1er passage : le bon type de véhicule ; 2e passage : les remplaçants (ex. TP à la place d'un VPI)
+    const chosen = [];
+    const left = () => Object.values(G.remainingNeeds(G.missingUnits(state, i), chosen)).reduce((a, b) => a + b, 0);
     const missing = G.missingUnits(state, i);
     for (const { v } of available)
       if (missing[v.type] > 0) {
-        ui.checked.add(v.id);
         missing[v.type]--;
+        chosen.push(v.type);
+        ui.checked.add(v.id);
       }
+    for (const { v } of available) {
+      if (ui.checked.has(v.id) || !left()) continue;
+      const before = left();
+      chosen.push(v.type);
+      if (left() < before) ui.checked.add(v.id);
+      else chosen.pop();
+    }
   }
 
   // retire de la sélection les véhicules partis ailleurs entre-temps
@@ -781,8 +832,9 @@ function renderIncident(i) {
   for (const id of ui.checked) if (!availIds.has(id)) ui.checked.delete(id);
 
   const missingNow = G.missingUnits(state, i);
-  const relevant = available.filter(({ v }) => t.need[v.type]);
-  const others = available.filter(({ v }) => !t.need[v.type]);
+  const relevant = available.filter(({ v }) => G.isUseful(t.need, v.type));
+  const others = available.filter(({ v }) => !G.isUseful(t.need, v.type));
+  const uncoverable = G.remainingNeeds(missingNow, available.map(({ v }) => v.type));
   const row = ({ v, km }) => `<label class="item check">
       <input type="checkbox" data-check="${v.id}" ${ui.checked.has(v.id) ? "checked" : ""} />
       <span class="dot" style="background:${catColor(category(v))}"></span>
@@ -796,6 +848,7 @@ function renderIncident(i) {
     <div class="muted">${esc(i.address)} · <span data-age="${i.id}"></span></div>
     <div style="margin-top:8px"><span class="badge ${i.status}">${incidentStatusLabel[i.status]}</span>
       ${i.status === "travail" ? `<span class="small muted" data-work="${i.id}"></span>` : ""}
+      ${i.status === "travail" && i.coverage < 1 ? `<div class="small" style="color:var(--warn);margin-top:4px">⚠ Moyens insuffisants (${Math.round(i.coverage * 100)} %) : plus lent, récompense réduite. Envoie des renforts pour accélérer.</div>` : ""}
       <span class="small muted">· récompense ${G.formatMoney(t.reward)}</span></div>
     <h3>Moyens requis</h3>
     <div class="need">${needs}</div>
@@ -808,10 +861,10 @@ function renderIncident(i) {
         : `<p class="muted small">Aucun véhicule disponible.</p>`
     }
     ${
-      Object.entries(missingNow).some(([type, n]) => available.filter(({ v }) => v.type === type).length < n)
-        ? `<div class="hint">Pas assez de véhicules disponibles pour couvrir tous les besoins
-           (${Object.entries(missingNow).map(([type, n]) => `${n}× ${G.VEHICLE_TYPES[type].short}`).join(", ")}).
-           Envoie ce que tu as, attends des retours, ou achète des véhicules depuis une caserne.</div>`
+      Object.keys(uncoverable).length
+        ? `<div class="hint">Il manque ${Object.entries(uncoverable).map(([type, n]) => `${n}× ${G.VEHICLE_TYPES[type].short}`).join(", ")}.
+           Envoie ce que tu as : une fois sur place, tes équipes travailleront quand même
+           (plus lentement, récompense réduite). Ou achète des véhicules depuis une caserne.</div>`
         : ""
     }
     <div class="actions">
@@ -846,6 +899,13 @@ const actions = {
     if (i) dispatch(i, [...ui.checked]);
   },
   recall: (d) => recall(d.id),
+  cheat: (d) => {
+    state.money += Number(d.amount);
+    G.save(state);
+    updateHud();
+    renderPanel();
+    toast(`+${G.formatMoney(Number(d.amount))} ajoutés.`, "ok");
+  },
   reset: () => {
     if (!confirm("Abandonner cette partie ? Toute la progression sera perdue.")) return;
     G.wipeSave();

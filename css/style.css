@@ -79,6 +79,7 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .item:hover, .item.sel { border-color: var(--line); }
 .item .grow { flex: 1; min-width: 0; }
+.item .title, .item .sub { display: block; }
 .item .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }

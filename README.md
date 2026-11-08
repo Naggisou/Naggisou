@@ -31,6 +31,15 @@ calcul d'itinéraires OSRM.
   chimique, commandement, transport de personnel), ambulance, SMUR, patrouille.
 - Si les moyens sont insuffisants, les équipes sur place travaillent quand même (plus lentement,
   récompense réduite) : les appels ne restent jamais bloqués.
+- **Appels interactifs** : un appel sonne (📞, sonnerie désactivable 🔔), il faut **décrocher**,
+  lire la conversation et poser des questions à l'appelant (blessés ? propagation ? armes ?) pour
+  révéler des renforts nécessaires avant le départ. Sinon, ils se découvrent sur place. ~7 % de
+  **canulars** à démasquer (+500 CHF) ; un appel sans personne sur place **s'aggrave** au bout de
+  10-16 min. Prise d'appel automatique dès la centrale cantonale.
+- **Véhicules** : police (patrouille, motard, constat, brigade canine, police judiciaire, maintien de
+  l'ordre, groupe d'intervention), sanitaire (ambulance, SMUR, transport, poste médical avancé,
+  hélicoptère qui vole en ligne droite), douane (patrouille, cynophile, bus, interception, scanner,
+  drone).
 - **Centrale d'engagement** à construire en premier : sans elle, aucun appel. 4 niveaux
   (4 → 8 → 14 → 25 appels simultanés).
 - **Patrouilles** (police, douane) : choisis une zone sur la carte, le véhicule la sillonne, reste

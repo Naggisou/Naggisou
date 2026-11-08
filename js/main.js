@@ -2,6 +2,7 @@ import { CANTONS, difficulty, startingBudget } from "./cantons.js";
 import { pointInGeometry, areaKm2, haversineKm, randomPointIn, inverseMask, distToSegmentsKm, sharedSegments } from "./geo.js";
 import { route, snapToRoad } from "./routing.js";
 import * as G from "./game.js";
+import * as CALLS from "./calls.js";
 
 const $panel = document.getElementById("panel");
 const $hud = document.getElementById("hud");
@@ -237,7 +238,7 @@ function addStationMarker(s) {
 function incidentIcon(i) {
   return L.divIcon({
     className: "",
-    html: `<div class="mk mk-incident ${STATUS_INC[i.status].cls}" style="--c:${catOf(i).color}"><span>${catOf(i).icon}</span></div>`,
+    html: `<div class="mk mk-incident ${i.answered ? STATUS_INC[i.status].cls : "s-ring"}" style="--c:${catOf(i).color}"><span>${i.answered ? catOf(i).icon : "📞"}</span></div>`,
     iconSize: [30, 30],
     iconAnchor: [15, 15],
   });
@@ -245,7 +246,11 @@ function incidentIcon(i) {
 
 function addIncidentMarker(i) {
   const m = L.marker([i.pt[1], i.pt[0]], { icon: incidentIcon(i), zIndexOffset: 500 })
-    .bindTooltip(() => `<b>${esc(G.incidentType(i.typeId).label)}</b><br><span class="small">${esc(i.address)} · ${STATUS_INC[i.status].label}</span>`)
+    .bindTooltip(() =>
+      i.answered
+        ? `<b>${esc(G.incidentType(i.typeId).label)}</b><br><span class="small">${esc(i.address)} · ${STATUS_INC[i.status].label}</span>`
+        : `<b>📞 Appel entrant ${G.STATION_TYPES[G.incidentType(i.typeId).cat].phone}</b><br><span class="small">Clique pour décrocher</span>`,
+    )
     .on("click", () => openView({ kind: "incident", id: i.id }))
     .addTo(layers.incidents);
   markers.incidents.set(i.id, m);
@@ -284,7 +289,7 @@ function setRouteLine(v) {
     color: catColor(category(v)),
     weight: 4,
     opacity: v.trip.kind === "incident" ? 0.8 : 0.45,
-    dashArray: v.trip.kind === "incident" ? null : "6 8",
+    dashArray: G.VEHICLE_TYPES[v.type].air ? "2 8" : v.trip.kind === "incident" ? null : "6 8",
     interactive: false,
   }).addTo(layers.routes);
   markers.routes.set(v.id, line);
@@ -478,6 +483,7 @@ function patrolDiscovery(v) {
   const i = {
     id: G.uid(state, "I"), typeId: t.id, pt: v.pos.slice(), address: nearestCommune(v.pos).name,
     createdAt: state.time, status: "engage", assigned: [v.id], workEnd: null, found: true,
+    answered: true, log: [{ who: "radio", text: `📻 ${v.name} : constat en patrouille.` }], questions: [], extra: {}, revealed: true,
   };
   v.status = "place";
   v.incidentId = i.id;
@@ -490,6 +496,155 @@ function patrolDiscovery(v) {
     dirty = true;
   });
   dirty = true;
+}
+
+// ---------- Appels interactifs ----------
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// Infos cachées d'un appel : canular ? questions et leurs réponses ? quand s'aggrave-t-il ?
+function prepareCall(type) {
+  const prank = Math.random() < CALLS.PRANK_P;
+  const owned = new Set(state.stations.map((s) => s.type));
+  const pool = [...(CALLS.QUESTIONS[type.cat] ?? [])].sort(() => Math.random() - 0.5).slice(0, 2);
+  const questions = pool.map((q) => {
+    // une réponse grave n'est possible que si le joueur a le service correspondant
+    const possible = Object.keys(q.add).every((v) => owned.has(G.VEHICLE_TYPES[v].category));
+    return { q: q.q, bad: !prank && possible && Math.random() < q.p, asked: false };
+  });
+  return {
+    answered: false,
+    log: [],
+    questions,
+    prank,
+    extra: {},
+    escalateAt: prank ? null : state.time + G.rand([10 * 60, 16 * 60]),
+  };
+}
+
+function questionDef(i, k) {
+  const cat = G.incidentType(i.typeId).cat;
+  return CALLS.QUESTIONS[cat].find((q) => q.q === i.questions[k].q);
+}
+
+function addExtra(i, add) {
+  for (const [k, n] of Object.entries(add)) i.extra[k] = (i.extra[k] ?? 0) + n;
+  if (i.status === "travail" && !G.requirementsMetOnScene(state, i)) i.coverage = Math.min(i.coverage ?? 1, G.coverageOnScene(state, i));
+  ui.checked = null; // recalcule la proposition
+}
+
+function answerCall(i, auto = false) {
+  if (i.answered) return;
+  const t = G.incidentType(i.typeId);
+  i.answered = true;
+  i.log.push({ who: "op", text: CALLS.GREETING[t.cat] });
+  i.log.push({
+    who: "caller",
+    text: i.prank ? pick(CALLS.PRANK_CALLER) : `${pick(CALLS.CALLER[t.id] ?? [t.label])} C'est ${i.address.includes(",") ? "" : "à "}${i.address}.`,
+  });
+  if (auto) i.log.push({ who: "sys", text: "Prise d'appel automatique par la centrale." });
+  refreshIncidentMarker(i);
+  dirty = true;
+}
+
+function askQuestion(i, k) {
+  const q = i.questions[k];
+  if (!q || q.asked) return;
+  q.asked = true;
+  const def = questionDef(i, k);
+  i.log.push({ who: "op", text: q.q });
+  if (i.prank) i.log.push({ who: "caller", text: pick(CALLS.PRANK_ANSWER) });
+  else if (q.bad) {
+    i.log.push({ who: "caller", text: def.bad, bad: true });
+    addExtra(i, def.add);
+    const what = Object.entries(def.add).map(([v, n]) => `+${n} ${G.VEHICLE_TYPES[v].short}`).join(", ");
+    i.log.push({ who: "sys", text: `Besoins mis à jour : ${what}` });
+  } else i.log.push({ who: "caller", text: def.ok });
+  dirty = true;
+}
+
+// Au premier véhicule sur place, ce qui n'a pas été demandé au téléphone se découvre
+function revealOnScene(i) {
+  if (i.revealed) return;
+  i.revealed = true;
+  i.questions.forEach((q, k) => {
+    if (q.asked || !q.bad) return;
+    q.asked = true;
+    const def = questionDef(i, k);
+    addExtra(i, def.add);
+    const what = Object.entries(def.add).map(([v, n]) => `+${n} ${G.VEHICLE_TYPES[v].short}`).join(", ");
+    i.log.push({ who: "radio", text: `📻 Sur place : ${def.bad.replace(/^(Oui|Non)[,.…!]*\s*/, "")} Renforts demandés : ${what}.` });
+    toast(`📻 ${G.incidentType(i.typeId).label} : renforts demandés (${what}).`, "warn", { incident: i.id, cat: G.incidentType(i.typeId).cat });
+  });
+}
+
+function escalate(i) {
+  const t = G.incidentType(i.typeId);
+  i.escalated = true;
+  const key = Object.keys(t.need)[0];
+  addExtra(i, { [key]: 1 });
+  i.log.push({ who: "radio", text: `🔺 Nouvel appel : la situation s'aggrave ! +1 ${G.VEHICLE_TYPES[key].short} nécessaire.` });
+  toast(`🔺 ${t.label} (${i.address}) s'aggrave : +1 ${G.VEHICLE_TYPES[key].short}`, "warn", { incident: i.id, cat: t.cat });
+  refreshIncidentMarker(i);
+  dirty = true;
+}
+
+function classifyPrank(i) {
+  const t = G.incidentType(i.typeId);
+  if (i.prank) {
+    state.money += 500;
+    state.stats.pranks = (state.stats.pranks ?? 0) + 1;
+    toast("🚫 Bien vu, c'était un canular ! +500 CHF (aucun véhicule gaspillé).", "ok");
+  } else {
+    state.money -= 1000;
+    state.stats.missed++;
+    toast(`😬 Ce n'était pas un canular : ${t.label} réel à ${i.address}. −1 000 CHF.`, "warn");
+  }
+  for (const vid of i.assigned) {
+    const v = vehicle(vid);
+    if (v && v.incidentId === i.id) sendHome(v);
+  }
+  removeIncident(i);
+  G.save(state);
+}
+
+function falseAlarm(i) {
+  for (const vid of i.assigned) {
+    const v = vehicle(vid);
+    if (v && v.incidentId === i.id) sendHome(v);
+  }
+  state.stats.pranks = (state.stats.pranks ?? 0) + 1;
+  toast(`🤷 Fausse alerte à ${i.address} : il n'y a rien sur place. Les véhicules rentrent.`, "warn");
+  removeIncident(i);
+}
+
+// Sonnerie (Web Audio, désactivable)
+let audioCtx = null;
+let muted = false;
+try { muted = localStorage.getItem("secours-muted") === "1"; } catch {}
+function ring() {
+  if (muted) return;
+  try {
+    audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+    const t0 = audioCtx.currentTime;
+    for (let k = 0; k < 2; k++) {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = "sine";
+      o.frequency.value = k ? 660 : 880;
+      g.gain.setValueAtTime(0.0001, t0 + k * 0.18);
+      g.gain.exponentialRampToValueAtTime(0.12, t0 + k * 0.18 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + k * 0.18 + 0.16);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(t0 + k * 0.18);
+      o.stop(t0 + k * 0.18 + 0.18);
+    }
+  } catch {}
+}
+function toggleSound() {
+  muted = !muted;
+  try { localStorage.setItem("secours-muted", muted ? "1" : "0"); } catch {}
+  document.getElementById("hud-sound").textContent = muted ? "🔕" : "🔔";
+  if (!muted) ring();
 }
 
 function addVehicle(s, vtype) {
@@ -527,7 +682,14 @@ let tripSeq = 0;
 async function driveTo(v, dest, kind) {
   const token = ++tripSeq;
   v.tripToken = token;
-  const r = await route(v.pos, dest);
+  const vt = G.VEHICLE_TYPES[v.type];
+  // Hélicoptère / drone : vol en ligne droite (décollage compris), sinon vraies routes
+  const r = vt.air
+    ? (() => {
+        const km = haversineKm(v.pos, dest);
+        return { coords: [[v.pos[1], v.pos[0]], [dest[1], dest[0]]], durationS: (km / vt.air) * 3600 + 90, offline: false, air: true };
+      })()
+    : await route(v.pos, dest);
   if (!state || v.tripToken !== token) return; // annulé entre-temps
   const cum = [0];
   for (let k = 1; k < r.coords.length; k++) {
@@ -542,7 +704,11 @@ async function driveTo(v, dest, kind) {
     total: Math.max(cum[cum.length - 1], 1e-6),
     start: state.time,
     // urgence = plus rapide, patrouille = plus lent ; la météo ralentit tout le monde
-    dur: Math.max(20, (r.durationS * (kind === "incident" ? G.URGENT_FACTOR : kind === "patrol" ? 1.2 : 1)) / (G.WEATHER[state.weather?.id]?.drive ?? 1)),
+    dur: Math.max(
+      20,
+      (r.durationS * (r.air ? 1 : (kind === "incident" ? G.URGENT_FACTOR : kind === "patrol" ? 1.2 : 1) * (vt.speed ?? 1))) /
+        (G.WEATHER[state.weather?.id]?.drive ?? 1),
+    ),
     dest,
     offline: r.offline,
   };
@@ -596,7 +762,9 @@ function arrive(v) {
   if (trip.kind === "incident") {
     const i = incident(v.incidentId);
     if (!i) return sendHome(v);
+    if (i.prank) return falseAlarm(i);
     v.status = "place";
+    revealOnScene(i);
   } else {
     v.status = "dispo";
     v.pos = station(v.stationId).pos.slice();
@@ -684,7 +852,7 @@ function startWork(i, coverage) {
 function completeIncident(i) {
   const t = G.incidentType(i.typeId);
   const coverage = i.coverage ?? 1;
-  const reward = Math.round((t.reward * (0.4 + 0.6 * coverage) * (i.found ? G.PATROL_BONUS : 1)) / 100) * 100;
+  const reward = Math.round((t.reward * (0.4 + 0.6 * coverage) * (i.found ? G.PATROL_BONUS : 1) * (1 + 0.25 * G.extraCount(i))) / 100) * 100;
   state.money += reward;
   state.stats.done++;
   state.stats.earned += reward;
@@ -748,10 +916,13 @@ async function spawnIncident() {
       status: "nouveau",
       assigned: [],
       workEnd: null,
+      ...prepareCall(type),
     };
     state.incidents.push(i);
     addIncidentMarker(i);
-    toast(`📞 ${type.label} — ${i.address}`, "call", { incident: i.id, cat: type.cat });
+    ring();
+    if (state.central.autoAnswer) answerCall(i, true);
+    toast(`📞 Appel entrant ${G.STATION_TYPES[type.cat].phone} — ${commune}`, "call", { incident: i.id, cat: type.cat });
     dirty = true;
   } finally {
     spawning = false;
@@ -803,6 +974,11 @@ function step(dt) {
       dirty = true;
     } else if (i.status === "travail" && state.time >= i.workEnd) {
       completeIncident(i);
+    } else if (
+      i.escalateAt && !i.escalated && state.time >= i.escalateAt &&
+      !i.assigned.some((id) => vehicle(id)?.status === "place")
+    ) {
+      escalate(i);
     } else if (i.status === "nouveau" && state.time - (i.waitingSince ?? i.createdAt) > G.UNATTENDED_TIMEOUT) {
       state.stats.missed++;
       toast(`✖ Appel sans réponse : ${G.incidentType(i.typeId).label} (${i.address})`, "warn");
@@ -844,6 +1020,8 @@ function setSpeed(s) {
   ui.speed = s;
   document.querySelectorAll(".speed button").forEach((b) => b.classList.toggle("on", Number(b.dataset.speed) === s));
 }
+document.getElementById("hud-sound").addEventListener("click", () => toggleSound());
+document.getElementById("hud-sound").textContent = muted ? "🔕" : "🔔";
 document.querySelector(".speed").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-speed]");
   if (b) setSpeed(Number(b.dataset.speed));
@@ -990,9 +1168,10 @@ function tabIncidents() {
   const cats = Object.keys(G.CATEGORIES).filter((c) => counts[c]);
   if (ui.filter.inc !== "all" && !counts[ui.filter.inc]) ui.filter.inc = "all";
   const order = { nouveau: 0, engage: 1, travail: 2 };
+  const ringFirst = (a, b) => (a.answered === b.answered ? 0 : a.answered ? 1 : -1);
   const list = state.incidents
     .filter((i) => ui.filter.inc === "all" || G.incidentType(i.typeId).cat === ui.filter.inc)
-    .sort((a, b) => order[a.status] - order[b.status] || b.createdAt - a.createdAt);
+    .sort((a, b) => ringFirst(a, b) || order[a.status] - order[b.status] || b.createdAt - a.createdAt);
 
   return `${cats.length > 1 ? filterChips("inc", cats, counts) : ""}
     <div class="list">${list
@@ -1000,12 +1179,22 @@ function tabIncidents() {
         const t = G.incidentType(i.typeId);
         const c = catOf(i);
         const st = STATUS_INC[i.status];
+        if (!i.answered)
+          return `<div class="card inc ringing" style="--c:${c.color}" data-action="open-incident" data-id="${i.id}" data-hover="inc:${i.id}">
+            <span class="ico">📞</span>
+            <span class="grow">
+              <span class="title">Appel entrant · ${G.STATION_TYPES[t.cat].phone}</span>
+              <span class="sub">📍 ${esc(i.address.split(", ").pop())} · ${c.label}</span>
+              <span class="meta"><span class="muted" data-age="${i.id}"></span><span class="esc" data-escalate="${i.id}"></span></span>
+            </span>
+            <button class="btn sm primary answer" data-action="answer" data-id="${i.id}">Décrocher</button>
+          </div>`;
         return `<button class="card inc ${st.cls}" style="--c:${c.color}" data-action="open-incident" data-id="${i.id}" data-hover="inc:${i.id}">
           <span class="ico">${c.icon}</span>
           <span class="grow">
             <span class="title">${esc(t.label)}</span>
             <span class="sub">📍 ${esc(i.address)}</span>
-            <span class="meta"><span class="pill ${st.cls}">${st.label}</span><span class="muted" data-age="${i.id}"></span>${unitDots(i)}</span>
+            <span class="meta"><span class="pill ${st.cls}">${st.label}</span>${G.extraCount(i) ? `<span class="pill s-eng">+${G.extraCount(i)} renfort${G.extraCount(i) > 1 ? "s" : ""}</span>` : ""}<span class="muted" data-age="${i.id}"></span><span class="esc" data-escalate="${i.id}"></span>${unitDots(i)}</span>
             ${i.status === "travail" ? `<span class="bar"><i data-progress="${i.id}"></i></span>` : ""}
           </span>
           <span class="reward">+${kChf(t.reward)}</span>
@@ -1124,6 +1313,8 @@ function tabBuild() {
       <div class="stat"><b>${state.vehicles.length}</b><span>véhicules</span></div>
       <div class="stat"><b>${s.done}</b><span>interventions réussies</span></div>
       <div class="stat"><b>${G.formatMoney(s.earned)}</b><span>gagnés</span></div>
+      <div class="stat"><b>${s.missed}</b><span>appels perdus</span></div>
+      <div class="stat"><b>${s.pranks ?? 0}</b><span>canulars démasqués</span></div>
     </div>
     <h3>Mode bac à sable</h3>
     <div class="actions">
@@ -1168,6 +1359,13 @@ function viewCentral() {
         <div class="stat"><b>${w.drive < 1 ? `−${Math.round((1 - w.drive) * 100)} %` : "normale"}</b><span>vitesse des trajets</span></div>
       </div>
       ${w.desc ? `<div class="hint">${w.icon} ${w.desc}</div>` : ""}
+      <h3>Options</h3>
+      <label class="toggle ${c.level < 2 ? "locked" : ""}">
+        <input type="checkbox" data-action-change="auto-answer" ${c.autoAnswer ? "checked" : ""} ${c.level < 2 ? "disabled" : ""} />
+        <span class="sw"></span>
+        <span class="grow"><span class="title">Prise d'appel automatique</span>
+        <span class="sub">${c.level < 2 ? "Disponible dès la centrale cantonale (niveau 3)" : "Les appels sont décrochés automatiquement (tu peux toujours poser les questions)"}</span></span>
+      </label>
       <h3>Niveaux de la centrale</h3>
       <div class="lvls">${levels}</div>
     </div>`;
@@ -1185,7 +1383,7 @@ function viewStation(s) {
       return `<div class="vcard ${dis ? "locked" : ""}">
         <span class="vbadge">${vt.short}</span>
         <div class="vname">${vt.label}</div>
-        <div class="vmeta">${n ? `${n} en caserne` : "aucun"}</div>
+        <div class="vmeta">${n ? `${n} en caserne` : "aucun"}${vt.air ? " · ✈️ vole en ligne droite" : ""}${vt.speed ? " · ⚡ rapide" : ""}${G.PATROL_TYPES.has(id) ? " · 🚓 patrouille" : ""}</div>
         <button class="btn sm primary" data-action="buy" data-station="${s.id}" data-id="${id}" ${dis ? "disabled" : ""}>
           ${G.formatMoney(vt.cost)}</button>
       </div>`;
@@ -1207,14 +1405,49 @@ function viewStation(s) {
     </div>`;
 }
 
+function viewRinging(i) {
+  const t = G.incidentType(i.typeId);
+  const c = catOf(i);
+  return `
+    <div class="banner" style="--c:${c.color}">
+      <button class="back" data-action="back">← Appels</button>
+      <div class="bn-row"><span class="bn-ico ring-ico">📞</span>
+        <div><h2>Appel entrant · ${G.STATION_TYPES[t.cat].phone}</h2><div class="bn-sub">${c.label} · secteur ${esc(i.address.split(", ").pop())}</div></div></div>
+      <div class="bn-pills"><span class="pill ghost" data-age="${i.id}"></span><span class="pill ghost esc" data-escalate="${i.id}"></span></div>
+    </div>
+    <div class="pbody ringing-body">
+      <div class="phone">
+        <div class="phone-ico">📞</div>
+        <p>Le téléphone sonne… Décroche pour savoir ce qui se passe, poser des questions et repérer les canulars.</p>
+        <button class="btn primary big" data-action="answer" data-id="${i.id}">📞 Décrocher</button>
+      </div>
+    </div>`;
+}
+
+function transcript(i) {
+  const who = { op: "Toi", caller: "Appelant", sys: "Centrale", radio: "Radio" };
+  const lines = i.log
+    .map((l, k) => `<div class="msg m-${l.who} ${l.bad ? "bad" : ""}" style="--d:${Math.max(0, k - (i.seen ?? 0)) * 0.25}s"><b>${who[l.who]}</b>${esc(l.text)}</div>`)
+    .join("");
+  i.seen = i.log.length;
+  const qs = i.questions
+    .map((q, k) => (q.asked ? "" : `<button class="qbtn" data-action="ask" data-id="${i.id}" data-k="${k}">❓ ${esc(q.q)}</button>`))
+    .join("");
+  const canPrank = !i.found && i.status !== "travail";
+  return `<div class="chat">${lines}</div>
+    ${qs || canPrank ? `<div class="qbtns">${qs}${canPrank ? `<button class="qbtn prank" data-action="prank" data-id="${i.id}">🚫 Classer comme canular</button>` : ""}</div>` : ""}`;
+}
+
 function viewIncident(i) {
+  if (!i.answered) return viewRinging(i);
   const t = G.incidentType(i.typeId);
   const c = catOf(i);
   const st = STATUS_INC[i.status];
   const assigned = i.assigned.map(vehicle).filter(Boolean);
   const missEngaged = G.missingUnits(state, i);
   const missScene = G.missingOnScene(state, i);
-  const needs = Object.entries(t.need)
+  const need = G.needOf(i);
+  const needs = Object.entries(need)
     .map(([type, n]) => {
       const vt = G.VEHICLE_TYPES[type];
       const scene = n - (missScene[type] ?? 0);
@@ -1236,7 +1469,7 @@ function viewIncident(i) {
     .sort((a, b) => a.km - b.km);
   // Véhicules engagés sur une autre intervention : on peut les rediriger ici
   const busy = state.vehicles
-    .filter((v) => v.incidentId && v.incidentId !== i.id && G.isUseful(t.need, v.type))
+    .filter((v) => v.incidentId && v.incidentId !== i.id && G.isUseful(need, v.type))
     .map((v) => ({ v, km: haversineKm(v.pos, i.pt) }))
     .sort((a, b) => a.km - b.km);
 
@@ -1248,8 +1481,8 @@ function viewIncident(i) {
   for (const id of ui.checked) if (!ids.has(id)) ui.checked.delete(id);
 
   const missingNow = G.missingUnits(state, i);
-  const relevant = available.filter(({ v }) => G.isUseful(t.need, v.type));
-  const others = available.filter(({ v }) => !G.isUseful(t.need, v.type));
+  const relevant = available.filter(({ v }) => G.isUseful(need, v.type));
+  const others = available.filter(({ v }) => !G.isUseful(need, v.type));
   const uncoverable = G.remainingNeeds(missingNow, available.map(({ v }) => v.type));
 
   const row = ({ v, km }) => {
@@ -1274,7 +1507,8 @@ function viewIncident(i) {
         <span class="pill ${st.cls}">${st.label}</span>
         <span class="pill ghost">${c.label}</span>
         <span class="pill ghost" data-age="${i.id}"></span>
-        <span class="pill ghost">💰 ${G.formatMoney(t.reward)}</span>
+        <span class="pill ghost">💰 ${G.formatMoney(Math.round(t.reward * (1 + 0.25 * G.extraCount(i))))}</span>
+        <span class="pill ghost esc" data-escalate="${i.id}"></span>
       </div>
       ${
         i.status === "travail"
@@ -1284,7 +1518,9 @@ function viewIncident(i) {
       }
     </div>
     <div class="pbody">
-      <h3>Moyens requis</h3>
+      <h3>Conversation</h3>
+      ${transcript(i)}
+      <h3>Moyens requis${G.extraCount(i) ? ` <small>(dont +${G.extraCount(i)} renfort${G.extraCount(i) > 1 ? "s" : ""})</small>` : ""}</h3>
       <div class="needs">${needs}</div>
       ${assigned.length ? `<h3>Engagés sur place / en route</h3><div class="vlist">${assigned.map((v) => vehicleRow(v)).join("")}</div>` : ""}
       <div class="h3row"><h3>Disponibles</h3>
@@ -1355,6 +1591,19 @@ function updateLive() {
     const i = incident(el.dataset.work);
     if (i?.workEnd) el.textContent = `fin dans ${G.formatDuration(Math.max(0, i.workEnd - state.time))}`;
   });
+  $panel.querySelectorAll("[data-escalate]").forEach((el) => {
+    const i = incident(el.dataset.escalate);
+    const onScene = i?.assigned.some((id) => vehicle(id)?.status === "place");
+    if (!i?.escalateAt || i.escalated || onScene) {
+      el.textContent = "";
+      el.hidden = true;
+      return;
+    }
+    const left = i.escalateAt - state.time;
+    el.hidden = false;
+    el.textContent = `🔺 s'aggrave dans ${G.formatDuration(Math.max(0, left))}`;
+    el.classList.toggle("urgent", left < 180);
+  });
   $panel.querySelectorAll("[data-progress]").forEach((el) => {
     const i = incident(el.dataset.progress);
     if (!i?.workEnd) return;
@@ -1423,6 +1672,26 @@ const actions = {
   },
   recall: (d) => recall(d.id),
   patrol: (d) => startPatrolPick(d.id),
+  answer: (d) => {
+    const i = incident(d.id);
+    if (!i) return;
+    answerCall(i);
+    openView({ kind: "incident", id: i.id });
+  },
+  ask: (d) => {
+    const i = incident(d.id);
+    if (i) askQuestion(i, Number(d.k));
+    renderPanel();
+  },
+  prank: (d) => {
+    const i = incident(d.id);
+    if (i && confirm("Classer cet appel comme canular ? S'il était réel, il sera perdu (−1 000 CHF).")) classifyPrank(i);
+  },
+  "auto-answer": () => {
+    state.central.autoAnswer = !state.central.autoAnswer;
+    G.save(state);
+    renderPanel();
+  },
   "open-central": () => openView({ kind: "central" }),
   "upgrade-central": () => upgradeCentral(),
   cheat: (d) => {
@@ -1449,6 +1718,7 @@ $panel.addEventListener("click", (e) => {
 });
 
 $panel.addEventListener("change", (e) => {
+  if (e.target.dataset.actionChange) return actions[e.target.dataset.actionChange]();
   const id = e.target.dataset.check;
   if (!id) return;
   e.target.checked ? ui.checked.add(id) : ui.checked.delete(id);

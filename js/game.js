@@ -15,15 +15,15 @@ export const STATION_TYPES = {
   },
   ems: {
     label: "Base d'ambulances", prefix: "Base sanitaire", cost: 60_000, icon: "🚑", phone: "144",
-    starter: "amb", capacity: 6, desc: "Malaises, chutes, urgences vitales.",
+    starter: "amb", capacity: 10, desc: "Malaises, chutes, urgences vitales.",
   },
   police: {
     label: "Poste de police", prefix: "Poste de police", cost: 50_000, icon: "🚓", phone: "117",
-    starter: "pat", capacity: 6, desc: "Cambriolages, bagarres, accidents.",
+    starter: "pat", capacity: 10, desc: "Cambriolages, bagarres, accidents.",
   },
   customs: {
     label: "Poste de douane", prefix: "Douane", cost: 70_000, icon: "🛃", phone: "OFDF",
-    starter: "dou", capacity: 8, borderOnly: true,
+    starter: "dou", capacity: 10, borderOnly: true,
     desc: "Contrebande, contrôles et trafics. Uniquement le long de la frontière nationale.",
   },
 };
@@ -58,16 +58,32 @@ export const VEHICLE_TYPES = {
   // Sanitaire
   amb: { label: "Ambulance", short: "AMB", category: "ems", cost: 25_000 },
   smur: { label: "SMUR (véhicule médecin)", short: "SMUR", category: "ems", cost: 35_000 },
+  ts: { label: "Transport sanitaire", short: "TS", category: "ems", cost: 15_000 },
+  pma: { label: "Poste médical avancé", short: "PMA", category: "ems", cost: 70_000 },
+  heli: { label: "Hélicoptère de sauvetage", short: "HELI", category: "ems", cost: 250_000, air: 220 },
   // Police
   pat: { label: "Patrouille", short: "PAT", category: "police", cost: 15_000 },
+  moto: { label: "Motard de police", short: "MOTO", category: "police", cost: 12_000, speed: 0.85 },
+  const: { label: "Unité accidents (constat)", short: "CONST", category: "police", cost: 20_000 },
+  chien: { label: "Brigade canine", short: "CHIEN", category: "police", cost: 22_000 },
+  pj: { label: "Police judiciaire", short: "PJ", category: "police", cost: 25_000 },
+  fmo: { label: "Fourgon de maintien de l'ordre", short: "FMO", category: "police", cost: 35_000 },
+  gi: { label: "Groupe d'intervention", short: "GI", category: "police", cost: 60_000 },
   // Douane (OFDF)
   dou: { label: "Patrouille douanière", short: "DOU", category: "customs", cost: 18_000 },
   cyno: { label: "Équipe cynophile", short: "K9", category: "customs", cost: 22_000 },
   bus: { label: "Bus de contrôle mobile", short: "BUS", category: "customs", cost: 30_000 },
+  int: { label: "Véhicule d'interception", short: "INT", category: "customs", cost: 28_000, speed: 0.85 },
+  scan: { label: "Scanner mobile à rayons X", short: "SCAN", category: "customs", cost: 80_000 },
+  drone: { label: "Drone de surveillance", short: "DRONE", category: "customs", cost: 40_000, air: 90 },
 };
+// air : vole en ligne droite à cette vitesse (km/h) ; speed : facteur de durée sur route (< 1 = plus rapide)
 
 // Un besoin peut aussi être couvert par un autre véhicule (ex. une tonne-pompe fait le travail d'un VPI)
-export const ALTERNATES = { vpi: ["tp"], vtp: ["tp"] };
+export const ALTERNATES = {
+  vpi: ["tp"], vtp: ["tp"], ts: ["amb"], heli: ["amb"], moto: ["pat"], fmo: ["pat"],
+  drone: ["dou"], scan: ["bus"], int: ["dou"],
+};
 
 // need : véhicules requis sur place ; work : durée de travail sur place (s de jeu)
 export const INCIDENT_TYPES = [
@@ -98,6 +114,20 @@ export const INCIDENT_TYPES = [
   // Mixte
   { id: "accident", label: "Accident de la circulation", need: { pat: 1, amb: 1 }, reward: 4_000, work: [240, 480], weight: 3, time: { rush: 1.7, night: 0.6 } },
   { id: "incarc", label: "Accident avec personne incarcérée", need: { tp: 1, vsr: 1, amb: 1, pat: 1 }, reward: 10_000, work: [420, 900], weight: 1, cat: "fire" },
+  { id: "poursuite", label: "Course-poursuite", need: { pat: 1, moto: 1 }, reward: 5_000, work: [300, 600], weight: 1, time: { night: 1.5 } },
+  { id: "braquage", label: "Braquage de commerce", need: { pat: 2, pj: 1, gi: 1 }, reward: 16_000, work: [600, 1200], weight: 0.4, time: { night: 1.4 } },
+  { id: "otage", label: "Prise d'otage", need: { gi: 2, pat: 2, pj: 1, amb: 1 }, reward: 35_000, work: [1200, 2400], weight: 0.12 },
+  { id: "manif", label: "Manifestation non autorisée", need: { fmo: 2, pat: 2 }, reward: 12_000, work: [900, 1800], weight: 0.4, time: { night: 0.2 } },
+  { id: "disparu", label: "Personne disparue", need: { pat: 1, chien: 1 }, reward: 4_000, work: [600, 1200], weight: 0.8 },
+  { id: "fuite", label: "Délit de fuite", need: { pat: 1, const: 1 }, reward: 3_500, work: [300, 600], weight: 1 },
+  { id: "domestique", label: "Violence domestique", need: { pat: 2 }, reward: 2_800, work: [300, 600], weight: 1, time: { night: 1.8 } },
+  { id: "vitesse", label: "Excès de vitesse", need: { moto: 1 }, reward: 900, work: [120, 240], weight: 1, time: { night: 0.5 } },
+  { id: "carambolage", label: "Carambolage", need: { pat: 2, const: 1, amb: 2, tp: 1 }, reward: 20_000, work: [900, 1800], weight: 0.3, cat: "police", time: { rush: 1.5 } },
+  { id: "montagne", label: "Accident de montagne", need: { heli: 1 }, reward: 7_000, work: [300, 600], weight: 0.6, time: { night: 0.3 } },
+  { id: "accouchement", label: "Accouchement imminent", need: { amb: 1, smur: 1 }, reward: 4_500, work: [300, 900], weight: 0.6 },
+  { id: "transport", label: "Transport de patient", need: { ts: 1 }, reward: 900, work: [120, 300], weight: 2, time: { night: 0.2 } },
+  { id: "intox", label: "Intoxication collective", need: { amb: 2, smur: 1, pma: 1 }, reward: 18_000, work: [900, 1800], weight: 0.25 },
+  { id: "noyade", label: "Noyade", need: { amb: 1, heli: 1 }, reward: 9_000, work: [300, 600], weight: 0.3, time: { night: 0.3 } },
   // Douane (toujours près de la frontière)
   { id: "contrebande", label: "Contrebande de marchandises", need: { dou: 1 }, reward: 2_000, work: [180, 420], weight: 3, time: { night: 1.4 } },
   { id: "franchissement", label: "Franchissement illégal de la frontière", need: { dou: 1 }, reward: 1_800, work: [180, 360], weight: 2, time: { night: 2 } },
@@ -108,6 +138,13 @@ export const INCIDENT_TYPES = [
   { id: "forcage", label: "Véhicule forçant le passage en douane", need: { dou: 2, pat: 1 }, reward: 7_000, work: [300, 600], weight: 0.8, cat: "customs" },
 ];
 // Service principal de chaque intervention (couleur) : explicite, sinon celui du 1er véhicule requis
+INCIDENT_TYPES.push(
+  { id: "frontiere_verte", label: "Surveillance de la frontière verte", need: { drone: 1 }, reward: 2_500, work: [300, 600], weight: 1, time: { night: 1.5 } },
+  { id: "double_fond", label: "Camion à double fond", need: { dou: 1, scan: 1 }, reward: 7_000, work: [420, 900], weight: 0.8 },
+  { id: "fuite_douane", label: "Véhicule en fuite après la douane", need: { int: 1, pat: 1 }, reward: 6_000, work: [300, 600], weight: 0.8, cat: "customs" },
+  { id: "passeurs", label: "Réseau de passeurs", need: { dou: 2, drone: 1, pat: 1 }, reward: 14_000, work: [900, 1800], weight: 0.3, cat: "customs" },
+  { id: "contrefacons", label: "Contrefaçons", need: { dou: 1, bus: 1 }, reward: 3_500, work: [300, 600], weight: 1 },
+);
 for (const t of INCIDENT_TYPES) t.cat ??= VEHICLE_TYPES[Object.keys(t.need)[0]].category;
 
 export const STATUS_LABEL = {
@@ -123,7 +160,7 @@ export const STATUS_LABEL = {
 export const FREE_STATUSES = new Set(["dispo", "retour", "patrouille"]);
 
 // --- Patrouilles ---
-export const PATROL_TYPES = new Set(["pat", "dou"]); // véhicules pouvant patrouiller
+export const PATROL_TYPES = new Set(["pat", "moto", "dou", "int"]); // véhicules pouvant patrouiller
 export const PATROL_RADIUS_KM = 3;
 export const PATROL_DISCOVERY = 25 * 60; // une découverte toutes les ~25 min de jeu par patrouille
 export const PATROL_BONUS = 1.25; // récompense majorée pour un flagrant délit
@@ -159,15 +196,15 @@ export const WEATHER = {
   },
   neige: {
     label: "Neige", icon: "❄️", temp: [-6, 1], drive: 0.7, rate: 1.2, weight: 0.8,
-    desc: "Trajets ralentis, accidents et chutes.", mult: { accident: 2.2, chute: 2, arbre: 1.5 },
+    desc: "Trajets ralentis, accidents et chutes.", mult: { accident: 2.2, chute: 2, arbre: 1.5, carambolage: 3, montagne: 2 },
   },
   brouillard: {
     label: "Brouillard", icon: "🌫️", temp: [1, 8], drive: 0.85, rate: 1.05, weight: 1,
-    desc: "Visibilité réduite, trajets ralentis.", mult: { accident: 2 },
+    desc: "Visibilité réduite, trajets ralentis.", mult: { accident: 2, carambolage: 3, frontiere_verte: 1.5 },
   },
   canicule: {
     label: "Canicule", icon: "🥵", temp: [27, 35], drive: 1, rate: 1.2, weight: 0.7,
-    desc: "Feux de végétation et malaises.", mult: { broussailles: 3.5, foret: 4, malaise: 2.5, acr: 1.5 },
+    desc: "Feux de végétation et malaises.", mult: { broussailles: 3.5, foret: 4, malaise: 2.5, acr: 1.5, noyade: 3 },
   },
 };
 
@@ -282,15 +319,26 @@ function assignedVehicles(state, incident, filter = () => true) {
   return incident.assigned.map((id) => state.vehicles.find((v) => v.id === id)).filter((v) => v && filter(v));
 }
 
+// Besoins réels d'une intervention : ceux du type + ceux révélés en cours (renforts)
+export function needOf(incident) {
+  const need = { ...incidentType(incident.typeId).need };
+  for (const [k, n] of Object.entries(incident.extra ?? {})) need[k] = (need[k] ?? 0) + n;
+  return need;
+}
+
+export function extraCount(incident) {
+  return Object.values(incident.extra ?? {}).reduce((a, b) => a + b, 0);
+}
+
 // Besoins pas encore couverts (sur place + en route)
 export function missingUnits(state, incident) {
-  return remainingNeeds(incidentType(incident.typeId).need, assignedVehicles(state, incident).map((v) => v.type));
+  return remainingNeeds(needOf(incident), assignedVehicles(state, incident).map((v) => v.type));
 }
 
 // Besoins pas encore couverts par les véhicules arrivés sur place
 export function missingOnScene(state, incident) {
   const onScene = assignedVehicles(state, incident, (v) => v.status === "place");
-  return remainingNeeds(incidentType(incident.typeId).need, onScene.map((v) => v.type));
+  return remainingNeeds(needOf(incident), onScene.map((v) => v.type));
 }
 
 export function requirementsMetOnScene(state, incident) {
@@ -299,8 +347,7 @@ export function requirementsMetOnScene(state, incident) {
 
 // Part des besoins couverts sur place (0..1)
 export function coverageOnScene(state, incident) {
-  const need = incidentType(incident.typeId).need;
-  return 1 - countNeeds(missingOnScene(state, incident)) / countNeeds(need);
+  return 1 - countNeeds(missingOnScene(state, incident)) / countNeeds(needOf(incident));
 }
 
 // Plus aucun véhicule en approche : on travaille avec ce qu'on a
@@ -361,6 +408,10 @@ export function load() {
       i.status = "nouveau";
       i.workEnd = null;
       i.waitingSince = state.time;
+      i.answered ??= true; // anciennes sauvegardes
+      i.log ??= [];
+      i.questions ??= [];
+      i.extra ??= {};
     }
     state.central ??= null;
     state.weather ??= { id: "soleil", until: state.time + 4 * 3600 };

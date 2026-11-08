@@ -80,3 +80,33 @@ export function inverseMask(geometry) {
     geometry: { type: "Polygon", coordinates: [world, ...polygons(geometry).map((p) => p[0])] },
   };
 }
+
+// Distance (km) d'un point au segment de droite le plus proche ; segments : [[a, b], ...]
+export function distToSegmentsKm(pt, segments) {
+  const kx = 111.32 * Math.cos((pt[1] * Math.PI) / 180);
+  const ky = 110.57;
+  let best = Infinity;
+  for (const [a, b] of segments) {
+    const ax = (a[0] - pt[0]) * kx, ay = (a[1] - pt[1]) * ky;
+    const bx = (b[0] - pt[0]) * kx, by = (b[1] - pt[1]) * ky;
+    const dx = bx - ax, dy = by - ay;
+    const len = dx * dx + dy * dy;
+    const t = len ? Math.min(1, Math.max(0, -(ax * dx + ay * dy) / len)) : 0;
+    const d = Math.hypot(ax + t * dx, ay + t * dy);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+// Tronçons de la frontière nationale qui bordent une géométrie de canton :
+// les deux couches viennent de la même topologie, leurs sommets coïncident exactement.
+export function sharedSegments(geometry, countryGeometry) {
+  const outer = countryGeometry.type === "Polygon" ? [countryGeometry.coordinates[0]] : countryGeometry.coordinates.map((p) => p[0]);
+  const keys = new Set(outer.flat().map((p) => p.join(",")));
+  const polys = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  const segs = [];
+  for (const [ring] of polys)
+    for (let k = 1; k < ring.length; k++)
+      if (keys.has(ring[k - 1].join(",")) && keys.has(ring[k].join(","))) segs.push([ring[k - 1], ring[k]]);
+  return segs;
+}

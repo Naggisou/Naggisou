@@ -1,5 +1,5 @@
 import { CANTONS, difficulty, startingBudget } from "./cantons.js";
-import { pointInGeometry, areaKm2, haversineKm, randomPointIn, inverseMask } from "./geo.js";
+import { pointInGeometry, areaKm2, haversineKm, randomPointIn, inverseMask, distToSegmentsKm, sharedSegments } from "./geo.js";
 import { route, snapToRoad } from "./routing.js";
 import * as G from "./game.js";
 
@@ -43,8 +43,8 @@ map.attributionControl.addAttribution(
   'Frontières : OFS GEOSTAT · Itinéraires : <a href="https://project-osrm.org/">OSRM</a> / OpenStreetMap',
 );
 
-const [cantonsFC, lakesFC, communes] = await Promise.all(
-  ["data/cantons.geojson", "data/lakes.geojson", "data/communes.json"].map((u) =>
+const [cantonsFC, lakesFC, communes, countryFC] = await Promise.all(
+  ["data/cantons.geojson", "data/lakes.geojson", "data/communes.json", "data/country.geojson"].map((u) =>
     fetch(u).then((r) => r.json()),
   ),
 );
@@ -89,21 +89,22 @@ function renderSelectIntro() {
     .sort((a, b) => a[1].name.localeCompare(b[1].name, "fr"))
     .map(([id, c]) => {
       const d = difficulty(c.pop);
+      const border = sharedSegments(cantonById.get(Number(id)).geometry, countryFC.features[0].geometry).length > 0;
       return `<button class="item" data-action="select-canton" data-id="${id}">
-        <span class="badge">${c.abbr}</span>
+        <span class="badge abbr">${c.abbr}</span>
         <span class="grow"><span class="title">${esc(c.name)}</span>
-        <span class="sub">${c.pop.toLocaleString("fr-CH")} hab. · ${esc(c.capital)}</span></span>
+        <span class="sub">${c.pop.toLocaleString("fr-CH")} hab. · ${esc(c.capital)}${border ? " · 🛃 frontière" : ""}</span></span>
         <span class="stars" title="${d.label}">${"★".repeat(d.stars)}</span>
       </button>`;
     })
     .join("");
-  $panel.innerHTML = `
+  $panel.innerHTML = `<div class="pbody">
     <h2>Choisis ton canton</h2>
     <p class="muted">Tu prends la direction de la centrale d'engagement d'un canton :
     construis tes casernes, achète tes véhicules et réponds aux appels 118 · 144 · 117
     sur le vrai réseau routier suisse.</p>
     <div class="hint">Clique sur un canton de la carte ou dans la liste.</div>
-    <div class="list">${items}</div>`;
+    <div class="list">${items}</div></div>`;
 }
 
 function selectCanton(id) {
@@ -115,7 +116,8 @@ function selectCanton(id) {
   const d = difficulty(c.pop);
   const nCommunes = communes.filter((x) => x.canton === id).length;
   map.flyToBounds(L.geoJSON(f).getBounds(), { padding: [30, 30], duration: 0.6 });
-  $panel.innerHTML = `
+  const border = sharedSegments(f.geometry, countryFC.features[0].geometry).length > 0;
+  $panel.innerHTML = `<div class="pbody">
     <button class="btn sm" data-action="select-back">← Tous les cantons</button>
     <h2 style="margin-top:12px">${esc(c.name)} <span class="badge">${c.abbr}</span></h2>
     <div class="muted">Chef-lieu : ${esc(c.capital)} · Langue : ${c.lang}</div>
@@ -125,8 +127,9 @@ function selectCanton(id) {
       <div class="stat"><b>${nCommunes}</b><span>communes</span></div>
       <div class="stat"><b class="stars">${"★".repeat(d.stars)}</b><span>${d.label}</span></div>
     </div>
-    <div class="stat" style="margin-bottom:14px"><b>${G.formatMoney(startingBudget(c.pop))}</b><span>budget de départ</span></div>
-    <button class="btn primary block" data-action="claim" data-id="${id}">Revendiquer le canton ${esc(articleCanton(c.name))}</button>`;
+    <div class="stat" style="margin-bottom:10px"><b>${G.formatMoney(startingBudget(c.pop))}</b><span>budget de départ</span></div>
+    <div class="hint" style="border-left-color:${G.CATEGORIES.customs.color}">${border ? "🛃 Canton frontalier : tu pourras construire des postes de douane." : "Pas de frontière nationale : pas de douane dans ce canton."}</div>
+    <button class="btn primary block" data-action="claim" data-id="${id}">Revendiquer le canton ${esc(articleCanton(c.name))}</button></div>`;
 }
 
 function articleCanton(name) {
@@ -156,7 +159,12 @@ const layers = {
   vehicles: L.layerGroup(),
 };
 const markers = { stations: new Map(), vehicles: new Map(), incidents: new Map(), routes: new Map() };
-const ui = { tab: "interventions", view: null, build: null, speed: 3, checked: null, checkedFor: null };
+const ui = {
+  tab: "interventions", view: null, build: null, speed: 3, checked: null, checkedFor: null,
+  filter: { inc: "all", veh: "all" }, othersOpen: false,
+};
+let borderSegs = []; // tronçons de frontière nationale du canton
+let borderLayer = null;
 
 const vehicle = (id) => state.vehicles.find((v) => v.id === id);
 const station = (id) => state.stations.find((s) => s.id === id);
@@ -176,6 +184,19 @@ function startPlay() {
   }).addTo(map);
   const outline = L.geoJSON(f, { interactive: false, style: { color: "#e3262f", weight: 3, fill: false } }).addTo(map);
   for (const l of Object.values(layers)) l.addTo(map);
+
+  // frontière terrestre uniquement (on ignore les tronçons au milieu des lacs)
+  borderSegs = sharedSegments(cantonGeom, countryFC.features[0].geometry).filter(
+    ([a, b]) => !inLake([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]),
+  );
+  borderLayer = L.layerGroup([
+    L.polyline(borderSegs.map(([a, b]) => [[a[1], a[0]], [b[1], b[0]]]), {
+      color: G.CATEGORIES.customs.color, weight: 18, opacity: 0.35, interactive: false, lineCap: "round",
+    }),
+    L.polyline(borderSegs.map(([a, b]) => [[a[1], a[0]], [b[1], b[0]]]), {
+      color: "#b2f2bb", weight: 2, dashArray: "6 6", interactive: false,
+    }),
+  ]);
 
   const b = outline.getBounds();
   map.setMaxBounds(null);
@@ -199,7 +220,7 @@ function addStationMarker(s) {
   const m = L.marker([s.pos[1], s.pos[0]], {
     icon: L.divIcon({
       className: "",
-      html: `<div class="mk mk-station" style="background:${t.color}">${t.icon}</div>`,
+      html: `<div class="mk mk-station" style="--c:${t.color}">${t.icon}</div>`,
       iconSize: [30, 30],
       iconAnchor: [15, 15],
     }),
@@ -214,15 +235,15 @@ function addStationMarker(s) {
 function incidentIcon(i) {
   return L.divIcon({
     className: "",
-    html: `<div class="mk mk-incident ${i.status}">${i.status === "travail" ? "⚙" : "!"}</div>`,
-    iconSize: [26, 26],
-    iconAnchor: [13, 13],
+    html: `<div class="mk mk-incident ${STATUS_INC[i.status].cls}" style="--c:${catOf(i).color}"><span>${catOf(i).icon}</span></div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
   });
 }
 
 function addIncidentMarker(i) {
   const m = L.marker([i.pt[1], i.pt[0]], { icon: incidentIcon(i), zIndexOffset: 500 })
-    .bindTooltip(() => `${esc(G.incidentType(i.typeId).label)}<br><span class="small">${esc(i.address)}</span>`)
+    .bindTooltip(() => `<b>${esc(G.incidentType(i.typeId).label)}</b><br><span class="small">${esc(i.address)} · ${STATUS_INC[i.status].label}</span>`)
     .on("click", () => openView({ kind: "incident", id: i.id }))
     .addTo(layers.incidents);
   markers.incidents.set(i.id, m);
@@ -241,9 +262,9 @@ function refreshVehicleMarker(v) {
   }
   const icon = L.divIcon({
     className: "",
-    html: `<div class="mk mk-vehicle ${v.status === "route" ? "moving" : ""}" style="background:${catColor(category(v))}"></div>`,
-    iconSize: [16, 16],
-    iconAnchor: [8, 8],
+    html: `<div class="mk mk-vehicle ${v.status === "route" ? "moving" : ""}" style="--c:${catColor(category(v))}">${G.VEHICLE_TYPES[v.type].short}</div>`,
+    iconSize: [34, 16],
+    iconAnchor: [17, 8],
   });
   if (!m) {
     m = L.marker([v.pos[1], v.pos[0]], { icon, zIndexOffset: 1000 })
@@ -277,6 +298,12 @@ function clearRouteLine(v) {
 function setBuild(type) {
   ui.build = ui.build === type ? null : type;
   document.body.classList.toggle("map-building", !!ui.build);
+  if (borderLayer) {
+    if (ui.build && G.STATION_TYPES[ui.build].borderOnly && borderSegs.length) {
+      borderLayer.addTo(map);
+      map.flyToBounds(L.latLngBounds(borderSegs.flat().map(([x, y]) => [y, x])).pad(0.15), { duration: 0.6 });
+    } else borderLayer.remove();
+  }
   renderPanel();
 }
 
@@ -297,6 +324,8 @@ map.on("click", async (e) => {
   if (!pointInGeometry(pt, cantonGeom)) return toast("Ce point est hors de ton canton.", "warn");
   if (inLake(pt)) return toast("Difficile de construire dans le lac…", "warn");
   if (state.money < t.cost) return toast("Budget insuffisant.", "warn");
+  if (t.borderOnly && distToSegmentsKm(pt, borderSegs) > G.BORDER_KM)
+    return toast(`Un ${t.label.toLowerCase()} doit être à moins de ${G.BORDER_KM} km de la frontière nationale (zone verte).`, "warn");
   setBuild(null);
 
   // On place la caserne sur la route la plus proche pour que les départs soient propres.
@@ -314,7 +343,7 @@ map.on("click", async (e) => {
   addVehicle(s, t.starter);
   if (state.nextSpawnAt == null) state.nextSpawnAt = state.time + 45;
   G.save(state);
-  toast(`${name} construite (${G.formatMoney(t.cost)}).`, "ok");
+  toast(`${t.icon} ${name} construit(e) (−${G.formatMoney(t.cost)}).`, "ok", { cat: typeId });
   renderPanel();
 });
 
@@ -450,7 +479,7 @@ function dispatch(i, ids) {
     refreshIncidentMarker(i);
   }
   ui.checked = null;
-  if (n) toast(`${n} véhicule(s) alarmé(s) pour « ${G.incidentType(i.typeId).label} ».`);
+  if (n) toast(`🚨 ${n} véhicule${n > 1 ? "s" : ""} alarmé${n > 1 ? "s" : ""} : ${G.incidentType(i.typeId).label}`, "", { cat: G.incidentType(i.typeId).cat });
   dirty = true;
 }
 
@@ -495,6 +524,7 @@ function startWork(i, coverage) {
   const t = G.incidentType(i.typeId);
   i.status = "travail";
   i.coverage = coverage;
+  i.workStart = state.time;
   // ex. moitié des moyens -> 2× plus long
   i.workEnd = state.time + G.rand(t.work) * (1 + (1 - coverage) * 2);
   refreshIncidentMarker(i);
@@ -514,7 +544,7 @@ function completeIncident(i) {
     if (v && v.incidentId === i.id) sendHome(v);
   }
   removeIncident(i);
-  toast(`✔ ${t.label} (${i.address}) terminé : +${G.formatMoney(reward)}`, "ok");
+  toast(`✔ ${t.label} (${i.address}) terminé : +${G.formatMoney(reward)}`, "ok", { cat: t.cat });
   G.save(state);
 }
 
@@ -536,6 +566,17 @@ async function spawnIncident() {
     const near = cantonCommunes.filter((c) => bases.some((s) => haversineKm(c.c, s.pos) < G.COVER_KM));
     const pool = near.length ? near : cantonCommunes;
     let pt = null;
+    if (type.cat === "customs" && borderSegs.length) {
+      // Appels douaniers : le long de la frontière, près d'un poste de douane
+      const segs = borderSegs.filter(([a]) => bases.some((s) => haversineKm(a, s.pos) < G.COVER_KM));
+      const pool2 = segs.length ? segs : borderSegs;
+      for (let k = 0; k < 40 && !pt; k++) {
+        const [a, b] = pool2[Math.floor(Math.random() * pool2.length)];
+        const f = Math.random();
+        const cand = [a[0] + (b[0] - a[0]) * f + (Math.random() - 0.5) * 0.03, a[1] + (b[1] - a[1]) * f + (Math.random() - 0.5) * 0.02];
+        if (pointInGeometry(cand, cantonGeom) && !inLake(cand) && distToSegmentsKm(cand, borderSegs) < G.BORDER_KM) pt = cand;
+      }
+    }
     for (let k = 0; k < 25 && !pt; k++) {
       const c = pool[Math.floor(Math.random() * pool.length)];
       const cand = [c.c[0] + (Math.random() - 0.5) * 0.016, c.c[1] + (Math.random() - 0.5) * 0.011];
@@ -559,7 +600,7 @@ async function spawnIncident() {
     };
     state.incidents.push(i);
     addIncidentMarker(i);
-    toast(`📞 ${type.label} — ${i.address}`);
+    toast(`📞 ${type.label} — ${i.address}`, "call", { incident: i.id, cat: type.cat });
     dirty = true;
   } finally {
     spawning = false;
@@ -645,173 +686,293 @@ document.querySelector(".speed").addEventListener("click", (e) => {
   if (b) setSpeed(Number(b.dataset.speed));
 });
 
+let shownMoney = null;
 function updateHud() {
-  document.getElementById("hud-money").textContent = G.formatMoney(state.money);
+  const $m = document.getElementById("hud-money");
+  if (shownMoney != null && state.money !== shownMoney) {
+    $m.classList.remove("up", "down");
+    void $m.offsetWidth; // relance l'animation
+    $m.classList.add(state.money > shownMoney ? "up" : "down");
+  }
+  shownMoney = state.money;
+  $m.textContent = G.formatMoney(state.money);
   document.getElementById("hud-clock").textContent = G.formatClock(state.time);
 }
 
-// Éléments du panneau qui changent en continu (ETA, chronos) sans tout redessiner
-function updateLive() {
-  $panel.querySelectorAll("[data-eta]").forEach((el) => {
-    const v = vehicle(el.dataset.eta);
-    el.textContent = v?.trip ? `${G.formatDuration(Math.max(0, v.trip.start + v.trip.dur - state.time))}` : "";
-  });
-  $panel.querySelectorAll("[data-age]").forEach((el) => {
-    const i = incident(el.dataset.age);
-    if (i) el.textContent = `il y a ${G.formatDuration(state.time - i.createdAt)}`;
-  });
-  $panel.querySelectorAll("[data-work]").forEach((el) => {
-    const i = incident(el.dataset.work);
-    if (i?.workEnd) el.textContent = `fin estimée dans ${G.formatDuration(Math.max(0, i.workEnd - state.time))}`;
-  });
-}
 
 // =====================================================================
 // Panneau latéral
 // =====================================================================
+const STATUS_INC = {
+  nouveau: { label: "Nouveau", cls: "s-new" },
+  engage: { label: "Moyens engagés", cls: "s-eng" },
+  travail: { label: "En cours", cls: "s-work" },
+};
+const catOf = (i) => G.CATEGORIES[G.incidentType(i.typeId).cat];
+const kChf = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
+
 function openView(view) {
   ui.view = view;
+  ui.scroll = 0;
   if (view?.kind === "incident") {
     const i = incident(view.id);
     if (i) map.panTo([i.pt[1], i.pt[0]]);
   }
-  renderPanel();
+  if (view?.kind === "station") {
+    const s = station(view.id);
+    if (s) map.panTo([s.pos[1], s.pos[0]]);
+  }
+  renderPanel(true);
 }
 
-function renderPanel() {
+// Redessine le panneau en conservant la position de défilement
+function renderPanel(resetScroll = false) {
   if (!state) return;
-  if (ui.view?.kind === "incident" && incident(ui.view.id)) return renderIncident(incident(ui.view.id));
-  if (ui.view?.kind === "station" && station(ui.view.id)) return renderStation(station(ui.view.id));
-  ui.view = null;
-  const open = state.incidents.length;
-  const tabs = [
-    ["interventions", `Interventions${open ? `<span class="count">${open}</span>` : ""}`],
-    ["vehicules", "Véhicules"],
-    ["construire", "Construire"],
-  ];
-  const body = { interventions: tabIncidents, vehicules: tabVehicles, construire: tabBuild }[ui.tab]();
-  $panel.innerHTML = `
-    <div class="tabs">${tabs
-      .map(([id, label]) => `<button data-action="tab" data-id="${id}" class="${ui.tab === id ? "on" : ""}">${label}</button>`)
-      .join("")}</div>${body}`;
+  const scroll = resetScroll ? 0 : $panel.scrollTop;
+  let html;
+  if (ui.view?.kind === "incident" && incident(ui.view.id)) html = viewIncident(incident(ui.view.id));
+  else if (ui.view?.kind === "station" && station(ui.view.id)) html = viewStation(station(ui.view.id));
+  else {
+    ui.view = null;
+    html = viewTabs();
+  }
+  $panel.innerHTML = html;
+  $panel.scrollTop = scroll;
   updateLive();
 }
 
-const statusDot = { nouveau: "var(--accent)", engage: "var(--warn)", travail: "var(--ok)" };
-const incidentStatusLabel = { nouveau: "Nouveau", engage: "Moyens engagés", travail: "En cours" };
+function viewTabs() {
+  const open = state.incidents.length;
+  const waiting = state.incidents.filter((i) => i.status === "nouveau").length;
+  const free = state.vehicles.filter((v) => v.status === "dispo").length;
+  const rate = state.stats.done + state.stats.missed
+    ? Math.round((100 * state.stats.done) / (state.stats.done + state.stats.missed))
+    : 100;
+  const tabs = [
+    ["interventions", "📞", "Appels", open ? `<span class="count ${waiting ? "hot" : ""}">${open}</span>` : ""],
+    ["vehicules", "🚨", "Unités", ""],
+    ["construire", "🏗️", "Construire", ""],
+  ];
+  const body = { interventions: tabIncidents, vehicules: tabVehicles, construire: tabBuild }[ui.tab]();
+  return `
+    <div class="phead">
+      <div class="kpis">
+        <div class="kpi"><b>${open}</b><span>appels ouverts</span></div>
+        <div class="kpi"><b>${free}<small>/${state.vehicles.length}</small></b><span>unités dispo</span></div>
+        <div class="kpi"><b>${rate}<small>%</small></b><span>réussite</span></div>
+      </div>
+      <nav class="tabs">${tabs
+        .map(
+          ([id, ico, label, extra]) =>
+            `<button data-action="tab" data-id="${id}" class="${ui.tab === id ? "on" : ""}"><span>${ico}</span>${label}${extra}</button>`,
+        )
+        .join("")}</nav>
+    </div>
+    <div class="pbody">${body}</div>`;
+}
 
-function tabIncidents() {
-  if (!state.stations.length)
-    return `<div class="hint">Aucune caserne pour l'instant. Va dans l'onglet <b>Construire</b>
-      et place ta première caserne dans ton canton.</div>
-      <button class="btn primary block" data-action="tab" data-id="construire">Construire</button>`;
-  if (!state.incidents.length) return `<p class="muted">Calme plat… pour l'instant. Les appels arrivent au fil du temps.</p>`;
-  return `<div class="list">${[...state.incidents]
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .map(
-      (i) => `<button class="item" data-action="open-incident" data-id="${i.id}">
-        <span class="dot" style="background:${statusDot[i.status]}"></span>
-        <span class="grow"><span class="title">${esc(G.incidentType(i.typeId).label)}</span>
-        <span class="sub">${esc(i.address)} · <span data-age="${i.id}"></span></span></span>
-        <span class="badge ${i.status}">${incidentStatusLabel[i.status]}</span>
-      </button>`,
-    )
+function filterChips(kind, cats, counts) {
+  const cur = ui.filter[kind];
+  const chip = (id, label, color, n) =>
+    `<button class="chip ${cur === id ? "on" : ""}" data-action="filter" data-kind="${kind}" data-id="${id}" style="--c:${color}">
+      ${id !== "all" ? `<i></i>` : ""}${label}${n != null ? ` <small>${n}</small>` : ""}</button>`;
+  return `<div class="chips">${chip("all", "Tous", "var(--muted)")}${cats
+    .map((c) => chip(c, `${G.CATEGORIES[c].icon} ${G.CATEGORIES[c].label}`, G.CATEGORIES[c].color, counts[c]))
     .join("")}</div>`;
 }
 
-function vehicleRow(v, { withRecall = true } = {}) {
-  const canRecall = withRecall && ["alerte", "route", "place"].includes(v.status);
-  return `<div class="item" data-action="${v.incidentId ? "open-incident" : ""}" data-id="${v.incidentId ?? ""}">
-    <span class="dot" style="background:${catColor(category(v))}"></span>
-    <span class="grow"><span class="title">${esc(v.name)}</span>
-    <span class="sub">${G.VEHICLE_TYPES[v.type].label} <span data-eta="${v.id}"></span></span></span>
-    <span class="badge ${v.status}">${G.STATUS_LABEL[v.status]}</span>
-    ${canRecall ? `<button class="btn sm" data-action="recall" data-id="${v.id}" title="Retour en caserne">↩</button>` : ""}
+function unitDots(i) {
+  return i.assigned
+    .map(vehicle)
+    .filter(Boolean)
+    .map((v) => `<span class="udot u-${v.status}" title="${esc(v.name)} · ${G.STATUS_LABEL[v.status]}">${G.VEHICLE_TYPES[v.type].short}</span>`)
+    .join("");
+}
+
+function tabIncidents() {
+  if (!state.stations.length)
+    return `<div class="empty">
+        <div class="big">🏗️</div>
+        <b>Aucun bâtiment pour l'instant</b>
+        <p>Construis ta première caserne dans ton canton pour recevoir des appels.</p>
+        <button class="btn primary" data-action="tab" data-id="construire">Construire</button>
+      </div>`;
+  if (!state.incidents.length)
+    return `<div class="empty"><div class="big">☕</div><b>Calme plat…</b><p>Les appels arrivent au fil du temps.</p></div>`;
+
+  const counts = {};
+  for (const i of state.incidents) counts[G.incidentType(i.typeId).cat] = (counts[G.incidentType(i.typeId).cat] ?? 0) + 1;
+  const cats = Object.keys(G.CATEGORIES).filter((c) => counts[c]);
+  if (ui.filter.inc !== "all" && !counts[ui.filter.inc]) ui.filter.inc = "all";
+  const order = { nouveau: 0, engage: 1, travail: 2 };
+  const list = state.incidents
+    .filter((i) => ui.filter.inc === "all" || G.incidentType(i.typeId).cat === ui.filter.inc)
+    .sort((a, b) => order[a.status] - order[b.status] || b.createdAt - a.createdAt);
+
+  return `${cats.length > 1 ? filterChips("inc", cats, counts) : ""}
+    <div class="list">${list
+      .map((i) => {
+        const t = G.incidentType(i.typeId);
+        const c = catOf(i);
+        const st = STATUS_INC[i.status];
+        return `<button class="card inc ${st.cls}" style="--c:${c.color}" data-action="open-incident" data-id="${i.id}" data-hover="inc:${i.id}">
+          <span class="ico">${c.icon}</span>
+          <span class="grow">
+            <span class="title">${esc(t.label)}</span>
+            <span class="sub">📍 ${esc(i.address)}</span>
+            <span class="meta"><span class="pill ${st.cls}">${st.label}</span><span class="muted" data-age="${i.id}"></span>${unitDots(i)}</span>
+            ${i.status === "travail" ? `<span class="bar"><i data-progress="${i.id}"></i></span>` : ""}
+          </span>
+          <span class="reward">+${kChf(t.reward)}</span>
+        </button>`;
+      })
+      .join("")}</div>`;
+}
+
+function vehicleRow(v, { recall = true } = {}) {
+  const vt = G.VEHICLE_TYPES[v.type];
+  const canRecall = recall && ["alerte", "route", "place"].includes(v.status);
+  const inc = v.incidentId && incident(v.incidentId);
+  return `<div class="vrow" style="--c:${catColor(vt.category)}" data-hover="veh:${v.id}"
+      ${inc ? `data-action="open-incident" data-id="${inc.id}"` : ""}>
+    <span class="vbadge">${vt.short}</span>
+    <span class="grow">
+      <span class="title">${esc(v.name)}</span>
+      <span class="sub">${inc ? `→ ${esc(G.incidentType(inc.typeId).label)}` : vt.label} <span class="eta" data-eta="${v.id}"></span></span>
+    </span>
+    <span class="pill v-${v.status}">${G.STATUS_LABEL[v.status]}</span>
+    ${canRecall ? `<button class="icon-btn" data-action="recall" data-id="${v.id}" title="Désengager et rentrer en caserne">↩</button>` : ""}
   </div>`;
 }
 
 function tabVehicles() {
-  if (!state.stations.length) return `<p class="muted">Pas encore de véhicules.</p>`;
-  return state.stations
-    .map(
-      (s) => `<h3>${G.STATION_TYPES[s.type].icon} <a href="#" data-action="open-station" data-id="${s.id}" style="color:inherit">${esc(s.name)}</a></h3>
-      <div class="list">${state.vehicles.filter((v) => v.stationId === s.id).map((v) => vehicleRow(v)).join("")}</div>`,
-    )
-    .join("");
+  if (!state.stations.length)
+    return `<div class="empty"><div class="big">🚒</div><b>Pas encore d'unités</b><p>Chaque bâtiment construit arrive avec un véhicule.</p></div>`;
+  const counts = {};
+  for (const s of state.stations) counts[s.type] = (counts[s.type] ?? 0) + state.vehicles.filter((v) => v.stationId === s.id).length;
+  const cats = Object.keys(G.CATEGORIES).filter((c) => counts[c]);
+  if (ui.filter.veh !== "all" && !counts[ui.filter.veh]) ui.filter.veh = "all";
+  const busy = state.vehicles.filter((v) => v.status !== "dispo").length;
+  return `
+    <div class="summary">
+      <span><i class="dotc" style="--c:var(--ok)"></i>${state.vehicles.length - busy} disponibles</span>
+      <span><i class="dotc" style="--c:var(--warn)"></i>${busy} en mission</span>
+    </div>
+    ${cats.length > 1 ? filterChips("veh", cats, counts) : ""}
+    ${state.stations
+      .filter((s) => ui.filter.veh === "all" || s.type === ui.filter.veh)
+      .map((s) => {
+        const t = G.STATION_TYPES[s.type];
+        const vs = state.vehicles.filter((v) => v.stationId === s.id);
+        const free = vs.filter((v) => v.status === "dispo").length;
+        return `<section class="group" style="--c:${t.color}">
+          <button class="ghead" data-action="open-station" data-id="${s.id}" data-hover="sta:${s.id}">
+            <span class="sico">${t.icon}</span>
+            <span class="grow"><span class="title">${esc(s.name)}</span><span class="sub">${t.label}</span></span>
+            <span class="pill ${free ? "v-dispo" : "v-place"}">${free}/${vs.length} dispo</span>
+            <span class="chev">›</span>
+          </button>
+          <div class="vlist">${vs.map((v) => vehicleRow(v)).join("")}</div>
+        </section>`;
+      })
+      .join("")}`;
 }
 
 function tabBuild() {
   const cards = Object.entries(G.STATION_TYPES)
-    .map(
-      ([id, t]) => `<div class="item" style="cursor:default">
-        <span class="mk mk-station" style="background:${t.color}">${t.icon}</span>
-        <span class="grow"><span class="title">${t.label}</span>
-        <span class="sub">${G.formatMoney(t.cost)} · appels ${t.phone} · inclut 1 ${G.VEHICLE_TYPES[t.starter].label.toLowerCase()}</span></span>
-        <button class="btn sm ${ui.build === id ? "active" : ""}" data-action="build" data-id="${id}"
-          ${state.money < t.cost ? "disabled" : ""}>${ui.build === id ? "Annuler" : "Placer"}</button>
-      </div>`,
-    )
+    .map(([id, t]) => {
+      const noBorder = t.borderOnly && !borderSegs.length;
+      const poor = state.money < t.cost;
+      const active = ui.build === id;
+      const why = noBorder ? "Pas de frontière nationale dans ce canton" : poor ? `Il manque ${G.formatMoney(t.cost - state.money)}` : "";
+      return `<div class="bcard ${active ? "active" : ""} ${noBorder || poor ? "locked" : ""}" style="--c:${t.color}">
+        <div class="btop"><span class="bicon">${t.icon}</span><span class="tag">${t.phone}</span></div>
+        <div class="btitle">${t.label}</div>
+        <div class="bdesc">${t.desc}</div>
+        ${t.borderOnly ? `<div class="bnote">📍 Frontière nationale uniquement (≤ ${G.BORDER_KM} km)</div>` : ""}
+        <div class="bfoot">
+          <span class="price">${G.formatMoney(t.cost)}</span>
+          <button class="btn sm ${active ? "warn" : "primary"}" data-action="build" data-id="${id}" ${noBorder || (poor && !active) ? "disabled" : ""}>
+            ${active ? "Annuler" : "Placer"}</button>
+        </div>
+        ${why ? `<div class="why">${why}</div>` : ""}
+      </div>`;
+    })
     .join("");
+  const s = state.stats;
   return `
-    ${ui.build ? `<div class="hint">Clique sur la carte, à l'intérieur de ton canton, pour placer : <b>${G.STATION_TYPES[ui.build].label}</b>.</div>` : ""}
-    <div class="list">${cards}</div>
+    ${ui.build ? `<div class="hint pulse">🖱️ Clique sur la carte, dans ton canton${G.STATION_TYPES[ui.build].borderOnly ? ", <b>près de la frontière en vert</b>" : ""}, pour placer : <b>${G.STATION_TYPES[ui.build].label}</b>. <kbd>Échap</kbd> pour annuler.</div>` : ""}
+    <div class="bgrid">${cards}</div>
     <h3>Bilan</h3>
     <div class="grid2">
       <div class="stat"><b>${state.stations.length}</b><span>bâtiments</span></div>
       <div class="stat"><b>${state.vehicles.length}</b><span>véhicules</span></div>
-      <div class="stat"><b>${state.stats.done}</b><span>interventions réussies</span></div>
-      <div class="stat"><b>${state.stats.missed}</b><span>appels perdus</span></div>
+      <div class="stat"><b>${s.done}</b><span>interventions réussies</span></div>
+      <div class="stat"><b>${G.formatMoney(s.earned)}</b><span>gagnés</span></div>
     </div>
     <h3>Mode bac à sable</h3>
     <div class="actions">
-      <button class="btn sm" data-action="cheat" data-amount="10000">+10 000 CHF</button>
-      <button class="btn sm" data-action="cheat" data-amount="100000">+100 000 CHF</button>
-      <button class="btn sm" data-action="cheat" data-amount="1000000">+1 000 000 CHF</button>
+      <button class="btn sm" data-action="cheat" data-amount="10000">💰 +10 000</button>
+      <button class="btn sm" data-action="cheat" data-amount="100000">💰 +100 000</button>
+      <button class="btn sm" data-action="cheat" data-amount="1000000">💰 +1 000 000</button>
     </div>
     <hr />
-    <button class="btn sm" data-action="reset">Abandonner et changer de canton</button>`;
+    <button class="btn sm danger" data-action="reset">Abandonner et changer de canton</button>`;
 }
 
-function renderStation(s) {
+function viewStation(s) {
   const t = G.STATION_TYPES[s.type];
   const vs = state.vehicles.filter((v) => v.stationId === s.id);
+  const full = vs.length >= t.capacity;
   const buy = Object.entries(G.VEHICLE_TYPES)
     .filter(([, vt]) => vt.category === s.type)
-    .map(
-      ([id, vt]) => `<div class="item" style="cursor:default">
-        <span class="badge">${vt.short}</span>
-        <span class="grow"><span class="title">${vt.label}</span>
-        <span class="sub">${G.formatMoney(vt.cost)} · ${state.vehicles.filter((v) => v.stationId === s.id && v.type === id).length} en caserne</span></span>
-        <button class="btn sm" data-action="buy" data-station="${s.id}" data-id="${id}"
-          ${state.money < vt.cost || vs.length >= t.capacity ? "disabled" : ""}>Acheter</button>
-      </div>`,
-    )
+    .map(([id, vt]) => {
+      const n = vs.filter((v) => v.type === id).length;
+      const dis = full || state.money < vt.cost;
+      return `<div class="vcard ${dis ? "locked" : ""}">
+        <span class="vbadge">${vt.short}</span>
+        <div class="vname">${vt.label}</div>
+        <div class="vmeta">${n ? `${n} en caserne` : "aucun"}</div>
+        <button class="btn sm primary" data-action="buy" data-station="${s.id}" data-id="${id}" ${dis ? "disabled" : ""}>
+          ${G.formatMoney(vt.cost)}</button>
+      </div>`;
+    })
     .join("");
-  $panel.innerHTML = `
-    <button class="btn sm" data-action="back">← Retour</button>
-    <h2 style="margin-top:12px">${t.icon} ${esc(s.name)}</h2>
-    <div class="muted">${t.label} · ${vs.length}/${t.capacity} places</div>
-    <h3>Véhicules</h3>
-    <div class="list">${vs.map((v) => vehicleRow(v)).join("")}</div>
-    <h3>Acheter un véhicule</h3>
-    ${vs.length >= t.capacity ? `<div class="hint">Caserne pleine : construis-en une autre.</div>` : ""}
-    <div class="list">${buy}</div>`;
-  updateLive();
+  return `
+    <div class="banner" style="--c:${t.color}">
+      <button class="back" data-action="back">← Retour</button>
+      <div class="bn-row"><span class="bn-ico">${t.icon}</span>
+        <div><h2>${esc(s.name)}</h2><div class="bn-sub">${t.label}</div></div></div>
+      <div class="cap"><span>Places</span><span class="bar"><i style="width:${(100 * vs.length) / t.capacity}%"></i></span><b>${vs.length}/${t.capacity}</b></div>
+    </div>
+    <div class="pbody" style="--c:${t.color}">
+      <h3>Véhicules</h3>
+      <div class="vlist">${vs.map((v) => vehicleRow(v)).join("")}</div>
+      <h3>Acheter un véhicule</h3>
+      ${full ? `<div class="hint">Caserne pleine : construis un autre bâtiment.</div>` : ""}
+      <div class="vgrid">${buy}</div>
+    </div>`;
 }
 
-function renderIncident(i) {
+function viewIncident(i) {
   const t = G.incidentType(i.typeId);
+  const c = catOf(i);
+  const st = STATUS_INC[i.status];
   const assigned = i.assigned.map(vehicle).filter(Boolean);
   const missEngaged = G.missingUnits(state, i);
   const missScene = G.missingOnScene(state, i);
   const needs = Object.entries(t.need)
     .map(([type, n]) => {
+      const vt = G.VEHICLE_TYPES[type];
       const scene = n - (missScene[type] ?? 0);
       const engaged = n - (missEngaged[type] ?? 0);
-      const alt = G.ALTERNATES[type]?.length
-        ? ` <span class="muted">(ou ${G.ALTERNATES[type].map((a) => G.VEHICLE_TYPES[a].short).join("/")})</span>`
-        : "";
-      return `<span class="${scene >= n ? "ok" : ""}">${n}× ${G.VEHICLE_TYPES[type].label}${alt} — ${engaged} engagé(s), ${scene} sur place</span>`;
+      const alt = G.ALTERNATES[type]?.length ? ` <small>ou ${G.ALTERNATES[type].map((a) => G.VEHICLE_TYPES[a].short).join("/")}</small>` : "";
+      const state_ = scene >= n ? "ok" : engaged >= n ? "go" : "";
+      return `<div class="need ${state_}" style="--c:${catColor(vt.category)}" title="${vt.label}">
+        <span class="nbadge">${vt.short}</span>
+        <span class="grow">${n}× ${vt.label}${alt}</span>
+        <span class="ncount">${scene >= n ? "✓" : `${engaged}/${n}`}</span>
+      </div>`;
     })
     .join("");
 
@@ -820,91 +981,156 @@ function renderIncident(i) {
     .filter((v) => v.status === "dispo" || v.status === "retour")
     .map((v) => ({ v, km: haversineKm(v.pos, i.pt) }))
     .sort((a, b) => a.km - b.km);
-
   // Véhicules engagés sur une autre intervention : on peut les rediriger ici
   const busy = state.vehicles
     .filter((v) => v.incidentId && v.incidentId !== i.id && G.isUseful(t.need, v.type))
     .map((v) => ({ v, km: haversineKm(v.pos, i.pt) }))
     .sort((a, b) => a.km - b.km);
 
-  // Proposition automatique : les plus proches qui couvrent les besoins manquants
   if (ui.checkedFor !== i.id || !ui.checked) {
     ui.checkedFor = i.id;
-    ui.checked = new Set();
-    // 1er passage : le bon type de véhicule ; 2e passage : les remplaçants (ex. TP à la place d'un VPI)
-    const chosen = [];
-    const left = () => Object.values(G.remainingNeeds(G.missingUnits(state, i), chosen)).reduce((a, b) => a + b, 0);
-    const missing = G.missingUnits(state, i);
-    for (const { v } of available)
-      if (missing[v.type] > 0) {
-        missing[v.type]--;
-        chosen.push(v.type);
-        ui.checked.add(v.id);
-      }
-    for (const { v } of available) {
-      if (ui.checked.has(v.id) || !left()) continue;
-      const before = left();
-      chosen.push(v.type);
-      if (left() < before) ui.checked.add(v.id);
-      else chosen.pop();
-    }
+    ui.checked = suggest(i, available);
   }
-
-  // retire de la sélection les véhicules partis ailleurs entre-temps
-  const availIds = new Set([...available, ...busy].map(({ v }) => v.id));
-  for (const id of ui.checked) if (!availIds.has(id)) ui.checked.delete(id);
+  const ids = new Set([...available, ...busy].map(({ v }) => v.id));
+  for (const id of ui.checked) if (!ids.has(id)) ui.checked.delete(id);
 
   const missingNow = G.missingUnits(state, i);
   const relevant = available.filter(({ v }) => G.isUseful(t.need, v.type));
   const others = available.filter(({ v }) => !G.isUseful(t.need, v.type));
   const uncoverable = G.remainingNeeds(missingNow, available.map(({ v }) => v.type));
-  const row = ({ v, km }) => `<label class="item check">
-      <input type="checkbox" data-check="${v.id}" ${ui.checked.has(v.id) ? "checked" : ""} />
-      <span class="dot" style="background:${catColor(category(v))}"></span>
-      <span class="grow"><span class="title">${esc(v.name)}</span>
-      <span class="sub">${G.VEHICLE_TYPES[v.type].label} · ~${km.toFixed(1)} km${v.status === "retour" ? " · en retour" : ""}${
-        v.incidentId ? ` · ${G.STATUS_LABEL[v.status].toLowerCase()} : ${esc(G.incidentType(incident(v.incidentId)?.typeId)?.label ?? "")}` : ""
-      }</span></span>
-    </label>`;
 
-  $panel.innerHTML = `
-    <button class="btn sm" data-action="back">← Interventions</button>
-    <h2 style="margin-top:12px">${esc(t.label)}</h2>
-    <div class="muted">${esc(i.address)} · <span data-age="${i.id}"></span></div>
-    <div style="margin-top:8px"><span class="badge ${i.status}">${incidentStatusLabel[i.status]}</span>
-      ${i.status === "travail" ? `<span class="small muted" data-work="${i.id}"></span>` : ""}
-      ${i.status === "travail" && i.coverage < 1 ? `<div class="small" style="color:var(--warn);margin-top:4px">⚠ Moyens insuffisants (${Math.round(i.coverage * 100)} %) : plus lent, récompense réduite. Envoie des renforts pour accélérer.</div>` : ""}
-      <span class="small muted">· récompense ${G.formatMoney(t.reward)}</span></div>
-    <h3>Moyens requis</h3>
-    <div class="need">${needs}</div>
-    ${assigned.length ? `<h3>Engagés</h3><div class="list">${assigned.map((v) => vehicleRow(v)).join("")}</div>` : ""}
-    <h3>Disponibles</h3>
-    ${
-      relevant.length || others.length
-        ? `<div class="list">${relevant.map(row).join("")}</div>
-           ${others.length ? `<details style="margin-top:8px"><summary class="small muted">Autres véhicules (${others.length})</summary><div class="list" style="margin-top:6px">${others.map(row).join("")}</div></details>` : ""}`
-        : `<p class="muted small">Aucun véhicule disponible.</p>`
-    }
-    ${
-      busy.length
-        ? `<h3>Engagés ailleurs (redirection)</h3>
-           <p class="small muted" style="margin:-4px 0 8px">Coche un véhicule pour le désengager de son intervention et l'envoyer ici.</p>
-           <div class="list">${busy.map(row).join("")}</div>`
-        : ""
-    }
-    ${
-      Object.keys(uncoverable).length
-        ? `<div class="hint">Il manque ${Object.entries(uncoverable).map(([type, n]) => `${n}× ${G.VEHICLE_TYPES[type].short}`).join(", ")}.
-           Envoie ce que tu as : une fois sur place, tes équipes travailleront quand même
-           (plus lentement, récompense réduite). Ou achète des véhicules depuis une caserne.</div>`
-        : ""
-    }
-    <div class="actions">
-      <button class="btn primary" data-action="dispatch" data-id="${i.id}" ${ui.checked.size ? "" : "disabled"}>
-        🚨 Alarmer (${ui.checked.size})</button>
+  const row = ({ v, km }) => {
+    const vt = G.VEHICLE_TYPES[v.type];
+    const inc = v.incidentId && incident(v.incidentId);
+    return `<label class="pick ${ui.checked.has(v.id) ? "on" : ""}" style="--c:${catColor(vt.category)}" data-hover="veh:${v.id}">
+      <input type="checkbox" data-check="${v.id}" ${ui.checked.has(v.id) ? "checked" : ""} />
+      <span class="vbadge">${vt.short}</span>
+      <span class="grow"><span class="title">${esc(v.name)}</span>
+        <span class="sub">${vt.label}${v.status === "retour" ? " · en retour" : ""}${inc ? ` · ${G.STATUS_LABEL[v.status].toLowerCase()} : ${esc(G.incidentType(inc.typeId).label)}` : ""}</span></span>
+      <span class="km">${km.toFixed(1)} km</span>
+      <span class="tick">✓</span>
+    </label>`;
+  };
+
+  return `
+    <div class="banner" style="--c:${c.color}">
+      <button class="back" data-action="back">← Appels</button>
+      <div class="bn-row"><span class="bn-ico">${c.icon}</span>
+        <div><h2>${esc(t.label)}</h2><div class="bn-sub">📍 ${esc(i.address)}</div></div></div>
+      <div class="bn-pills">
+        <span class="pill ${st.cls}">${st.label}</span>
+        <span class="pill ghost">${c.label}</span>
+        <span class="pill ghost" data-age="${i.id}"></span>
+        <span class="pill ghost">💰 ${G.formatMoney(t.reward)}</span>
+      </div>
+      ${
+        i.status === "travail"
+          ? `<div class="work"><span class="bar"><i data-progress="${i.id}"></i></span><span data-work="${i.id}"></span></div>
+             ${i.coverage < 1 ? `<div class="degraded">⚠ Moyens insuffisants (${Math.round(i.coverage * 100)} %) : plus lent, récompense réduite. Envoie des renforts pour accélérer.</div>` : ""}`
+          : ""
+      }
+    </div>
+    <div class="pbody">
+      <h3>Moyens requis</h3>
+      <div class="needs">${needs}</div>
+      ${assigned.length ? `<h3>Engagés sur place / en route</h3><div class="vlist">${assigned.map((v) => vehicleRow(v)).join("")}</div>` : ""}
+      <div class="h3row"><h3>Disponibles</h3>
+        <span><button class="link" data-action="auto" data-id="${i.id}">Proposition auto</button> · <button class="link" data-action="none">Aucun</button></span></div>
+      ${
+        relevant.length
+          ? `<div class="picks">${relevant.map(row).join("")}</div>`
+          : `<p class="muted small">Aucun véhicule utile disponible.</p>`
+      }
+      ${
+        others.length
+          ? `<details ${ui.othersOpen ? "open" : ""} data-details="others"><summary>Autres véhicules (${others.length})</summary><div class="picks">${others.map(row).join("")}</div></details>`
+          : ""
+      }
+      ${
+        busy.length
+          ? `<h3>Engagés ailleurs <small>(redirection)</small></h3>
+             <p class="small muted" style="margin:-4px 0 8px">Coche un véhicule pour le désengager de son intervention et l'envoyer ici.</p>
+             <div class="picks">${busy.map(row).join("")}</div>`
+          : ""
+      }
+      ${
+        Object.keys(uncoverable).length
+          ? `<div class="hint">Il manque ${Object.entries(uncoverable).map(([type, n]) => `<b>${n}× ${G.VEHICLE_TYPES[type].short}</b>`).join(", ")}.
+             Envoie ce que tu as : sur place, tes équipes travailleront quand même (plus lentement, récompense réduite).</div>`
+          : ""
+      }
+    </div>
+    <div class="actionbar">
+      <button class="btn primary big" data-action="dispatch" data-id="${i.id}" ${ui.checked.size ? "" : "disabled"}>
+        🚨 Alarmer <span data-count>${ui.checked.size}</span> véhicule${ui.checked.size > 1 ? "s" : ""}</button>
     </div>`;
-  updateLive();
 }
+
+// Proposition : les plus proches du bon type, puis les remplaçants (ex. TP à la place d'un VPI)
+function suggest(i, available) {
+  const checked = new Set();
+  const chosen = [];
+  const left = () => Object.values(G.remainingNeeds(G.missingUnits(state, i), chosen)).reduce((a, b) => a + b, 0);
+  const missing = G.missingUnits(state, i);
+  for (const { v } of available)
+    if (missing[v.type] > 0) {
+      missing[v.type]--;
+      chosen.push(v.type);
+      checked.add(v.id);
+    }
+  for (const { v } of available) {
+    if (checked.has(v.id) || !left()) continue;
+    const before = left();
+    chosen.push(v.type);
+    if (left() < before) checked.add(v.id);
+    else chosen.pop();
+  }
+  return checked;
+}
+
+// Éléments du panneau qui changent en continu (ETA, chronos, progression)
+function updateLive() {
+  $panel.querySelectorAll("[data-eta]").forEach((el) => {
+    const v = vehicle(el.dataset.eta);
+    el.textContent = v?.trip ? `· ${G.formatDuration(Math.max(0, v.trip.start + v.trip.dur - state.time))}` : "";
+  });
+  $panel.querySelectorAll("[data-age]").forEach((el) => {
+    const i = incident(el.dataset.age);
+    if (i) el.textContent = `⏱ ${G.formatDuration(state.time - i.createdAt)}`;
+  });
+  $panel.querySelectorAll("[data-work]").forEach((el) => {
+    const i = incident(el.dataset.work);
+    if (i?.workEnd) el.textContent = `fin dans ${G.formatDuration(Math.max(0, i.workEnd - state.time))}`;
+  });
+  $panel.querySelectorAll("[data-progress]").forEach((el) => {
+    const i = incident(el.dataset.progress);
+    if (!i?.workEnd) return;
+    const start = i.workStart ?? i.workEnd - 600;
+    el.style.width = `${Math.min(100, Math.max(0, (100 * (state.time - start)) / (i.workEnd - start)))}%`;
+  });
+}
+
+// ---------- Survol : liste ↔ carte ----------
+let hovered = null;
+function hoverMarker(key, on) {
+  const [kind, id] = key.split(":");
+  const m = { inc: markers.incidents, veh: markers.vehicles, sta: markers.stations }[kind]?.get(id);
+  if (!m) return;
+  m.getElement()?.classList.toggle("hl", on);
+  if (on) m.openTooltip();
+  else m.closeTooltip();
+}
+$panel.addEventListener("mouseover", (e) => {
+  const key = e.target.closest("[data-hover]")?.dataset.hover ?? null;
+  if (key === hovered) return;
+  if (hovered) hoverMarker(hovered, false);
+  hovered = key;
+  if (key) hoverMarker(key, true);
+});
+$panel.addEventListener("mouseleave", () => {
+  if (hovered) hoverMarker(hovered, false);
+  hovered = null;
+});
 
 // ---------- Actions ----------
 const actions = {
@@ -919,6 +1145,10 @@ const actions = {
   tab: (d) => {
     ui.tab = d.id;
     ui.view = null;
+    renderPanel(true);
+  },
+  filter: (d) => {
+    ui.filter[d.kind] = d.id;
     renderPanel();
   },
   back: () => openView(null),
@@ -930,13 +1160,21 @@ const actions = {
     const i = incident(d.id);
     if (i) dispatch(i, [...ui.checked]);
   },
+  auto: (d) => {
+    ui.checked = null;
+    renderPanel();
+  },
+  none: () => {
+    ui.checked = new Set();
+    renderPanel();
+  },
   recall: (d) => recall(d.id),
   cheat: (d) => {
     state.money += Number(d.amount);
     G.save(state);
     updateHud();
     renderPanel();
-    toast(`+${G.formatMoney(Number(d.amount))} ajoutés.`, "ok");
+    toast(`💰 +${G.formatMoney(Number(d.amount))} ajoutés.`, "ok");
   },
   reset: () => {
     if (!confirm("Abandonner cette partie ? Toute la progression sera perdue.")) return;
@@ -947,8 +1185,9 @@ const actions = {
 
 $panel.addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");
-  if (!el || !el.dataset.action || !actions[el.dataset.action]) return;
-  if (el.tagName === "A") e.preventDefault();
+  if (!el || !actions[el.dataset.action]) return;
+  if (el.closest("label.pick") && !el.matches("button")) return; // laisse la case à cocher gérer
+  e.preventDefault();
   e.stopPropagation();
   actions[el.dataset.action](el.dataset, el);
 });
@@ -957,21 +1196,56 @@ $panel.addEventListener("change", (e) => {
   const id = e.target.dataset.check;
   if (!id) return;
   e.target.checked ? ui.checked.add(id) : ui.checked.delete(id);
+  e.target.closest(".pick")?.classList.toggle("on", e.target.checked);
   const btn = $panel.querySelector('[data-action="dispatch"]');
   if (btn) {
     btn.disabled = !ui.checked.size;
-    btn.textContent = `🚨 Alarmer (${ui.checked.size})`;
+    btn.innerHTML = `🚨 Alarmer <span data-count>${ui.checked.size}</span> véhicule${ui.checked.size > 1 ? "s" : ""}`;
+  }
+});
+
+$panel.addEventListener(
+  "toggle",
+  (e) => {
+    if (e.target.dataset?.details === "others") ui.othersOpen = e.target.open;
+  },
+  true,
+);
+
+// Raccourcis clavier : Espace = pause, 1-4 = vitesses, Échap = annuler / retour
+let lastSpeed = 3;
+document.addEventListener("keydown", (e) => {
+  if (!state || e.target.matches("input, textarea")) return;
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (ui.speed) {
+      lastSpeed = ui.speed;
+      setSpeed(0);
+    } else setSpeed(lastSpeed);
+  } else if (["Digit1", "Digit2", "Digit3", "Digit4"].includes(e.code)) {
+    setSpeed([1, 3, 10, 30][Number(e.code.slice(-1)) - 1]);
+  } else if (e.key === "Escape") {
+    if (ui.build) setBuild(null);
+    else if (ui.view) openView(null);
   }
 });
 
 // ---------- Notifications ----------
-function toast(msg, kind = "") {
+// opts.incident : rend la notification cliquable (ouvre l'appel) ; opts.cat : couleur du service
+function toast(msg, kind = "", opts = {}) {
   const box = document.getElementById("toasts");
-  const el = document.createElement("div");
-  el.className = `toast ${kind}`;
+  const el = document.createElement(opts.incident ? "button" : "div");
+  el.className = `toast ${kind} ${opts.incident ? "clickable" : ""}`;
+  if (opts.cat) el.style.setProperty("--c", G.CATEGORIES[opts.cat].color);
   el.textContent = msg;
+  if (opts.incident)
+    el.addEventListener("click", () => {
+      if (incident(opts.incident)) openView({ kind: "incident", id: opts.incident });
+      el.remove();
+    });
   box.appendChild(el);
   while (box.children.length > 5) box.firstChild.remove();
+  setTimeout(() => el.classList.add("out"), 5600);
   setTimeout(() => el.remove(), 6000);
 }
 

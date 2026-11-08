@@ -1,19 +1,36 @@
 // Règles du jeu et état de la partie (sans dépendance à la carte ni au DOM).
 
+// Code couleur par service : utilisé partout (bâtiments, véhicules, appels, menus)
+export const CATEGORIES = {
+  fire: { label: "Pompiers", color: "#e03131", icon: "🔥" },
+  ems: { label: "Sanitaire", color: "#f59f00", icon: "✚" },
+  police: { label: "Police", color: "#1c7ed6", icon: "🛡️" },
+  customs: { label: "Douane", color: "#2f9e44", icon: "🛃" },
+};
+
 export const STATION_TYPES = {
   fire: {
-    label: "Caserne de pompiers", prefix: "Caserne", cost: 80_000,
-    color: "#d62828", icon: "🚒", phone: "118", starter: "tp", capacity: 12,
+    label: "Caserne de pompiers", prefix: "Caserne", cost: 80_000, icon: "🚒", phone: "118",
+    starter: "tp", capacity: 12, desc: "Incendies, inondations, sauvetages, pollutions.",
   },
   ems: {
-    label: "Base d'ambulances", prefix: "Base sanitaire", cost: 60_000,
-    color: "#e9a800", icon: "🚑", phone: "144", starter: "amb", capacity: 6,
+    label: "Base d'ambulances", prefix: "Base sanitaire", cost: 60_000, icon: "🚑", phone: "144",
+    starter: "amb", capacity: 6, desc: "Malaises, chutes, urgences vitales.",
   },
   police: {
-    label: "Poste de police", prefix: "Poste de police", cost: 50_000,
-    color: "#1d4ed8", icon: "🚓", phone: "117", starter: "pat", capacity: 6,
+    label: "Poste de police", prefix: "Poste de police", cost: 50_000, icon: "🚓", phone: "117",
+    starter: "pat", capacity: 6, desc: "Cambriolages, bagarres, accidents.",
+  },
+  customs: {
+    label: "Poste de douane", prefix: "Douane", cost: 70_000, icon: "🛃", phone: "OFDF",
+    starter: "dou", capacity: 8, borderOnly: true,
+    desc: "Contrebande, contrôles et trafics. Uniquement le long de la frontière nationale.",
   },
 };
+for (const [id, t] of Object.entries(STATION_TYPES)) t.color = CATEGORIES[id].color;
+
+// Un poste de douane doit être à moins de BORDER_KM de la frontière nationale
+export const BORDER_KM = 2.5;
 
 export const VEHICLE_TYPES = {
   // Sapeurs-pompiers
@@ -30,6 +47,10 @@ export const VEHICLE_TYPES = {
   smur: { label: "SMUR (véhicule médecin)", short: "SMUR", category: "ems", cost: 35_000 },
   // Police
   pat: { label: "Patrouille", short: "PAT", category: "police", cost: 15_000 },
+  // Douane (OFDF)
+  dou: { label: "Patrouille douanière", short: "DOU", category: "customs", cost: 18_000 },
+  cyno: { label: "Équipe cynophile", short: "K9", category: "customs", cost: 22_000 },
+  bus: { label: "Bus de contrôle mobile", short: "BUS", category: "customs", cost: 30_000 },
 };
 
 // Un besoin peut aussi être couvert par un autre véhicule (ex. une tonne-pompe fait le travail d'un VPI)
@@ -60,8 +81,18 @@ export const INCIDENT_TYPES = [
   { id: "bagarre", label: "Bagarre", need: { pat: 2 }, reward: 3_000, work: [180, 360], weight: 2 },
   // Mixte
   { id: "accident", label: "Accident de la circulation", need: { pat: 1, amb: 1 }, reward: 4_000, work: [240, 480], weight: 3 },
-  { id: "incarc", label: "Accident avec personne incarcérée", need: { tp: 1, vsr: 1, amb: 1, pat: 1 }, reward: 10_000, work: [420, 900], weight: 1 },
+  { id: "incarc", label: "Accident avec personne incarcérée", need: { tp: 1, vsr: 1, amb: 1, pat: 1 }, reward: 10_000, work: [420, 900], weight: 1, cat: "fire" },
+  // Douane (toujours près de la frontière)
+  { id: "contrebande", label: "Contrebande de marchandises", need: { dou: 1 }, reward: 2_000, work: [180, 420], weight: 3 },
+  { id: "franchissement", label: "Franchissement illégal de la frontière", need: { dou: 1 }, reward: 1_800, work: [180, 360], weight: 2 },
+  { id: "animaux", label: "Importation illégale d'animaux", need: { dou: 1 }, reward: 2_200, work: [240, 480], weight: 1 },
+  { id: "poidslourd", label: "Contrôle d'un poids lourd suspect", need: { dou: 1, bus: 1 }, reward: 4_500, work: [420, 900], weight: 1.5 },
+  { id: "armes", label: "Armes non déclarées", need: { dou: 1, cyno: 1 }, reward: 5_000, work: [300, 600], weight: 1 },
+  { id: "stups", label: "Trafic de stupéfiants", need: { dou: 1, cyno: 1, pat: 1 }, reward: 8_000, work: [420, 900], weight: 1, cat: "customs" },
+  { id: "forcage", label: "Véhicule forçant le passage en douane", need: { dou: 2, pat: 1 }, reward: 7_000, work: [300, 600], weight: 0.8, cat: "customs" },
 ];
+// Service principal de chaque intervention (couleur) : explicite, sinon celui du 1er véhicule requis
+for (const t of INCIDENT_TYPES) t.cat ??= VEHICLE_TYPES[Object.keys(t.need)[0]].category;
 
 export const STATUS_LABEL = {
   dispo: "Disponible",

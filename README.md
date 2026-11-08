@@ -31,6 +31,14 @@ calcul d'itinéraires OSRM.
   chimique, commandement, transport de personnel), ambulance, SMUR, patrouille.
 - Si les moyens sont insuffisants, les équipes sur place travaillent quand même (plus lentement,
   récompense réduite) : les appels ne restent jamais bloqués.
+- **Douane (OFDF)** : poste de douane constructible uniquement à ≤ 2,5 km de la frontière nationale
+  terrestre (zone verte affichée en mode construction), avec patrouille douanière, équipe cynophile,
+  bus de contrôle et ses propres appels (contrebande, poids lourd suspect, stupéfiants…) le long de la frontière.
+- Code couleur par service partout (carte, listes, notifications) : pompiers rouge, sanitaire jaune,
+  police bleu, douane vert.
+- Interface : onglets avec compteurs, filtres par service, cartes d'appels avec progression,
+  survol liste ↔ carte, notifications cliquables, raccourcis clavier (Espace = pause, 1-4 = vitesse,
+  Échap = annuler/retour).
 - Mode bac à sable : boutons pour ajouter de l'argent (onglet Construire).
 - Appels aléatoires dans la zone couverte par tes bâtiments, avec adresse (rue réelle + commune).
 - Alarme avec proposition automatique des véhicules les plus proches, trajets animés sur les

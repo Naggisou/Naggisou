@@ -354,3 +354,28 @@ summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-bottom: 
   .brand b { display: none; }
   .bgrid, .vgrid { grid-template-columns: 1fr; }
 }
+
+/* ---------- Centrale, patrouilles, temps ---------- */
+#hud-weather { cursor: help; }
+.leaflet-tile-pane {
+  filter: brightness(calc(0.42 + 0.58 * var(--daylight, 1))) saturate(calc(0.5 + 0.5 * var(--daylight, 1)));
+  transition: filter 2s;
+}
+.mk-central {
+  width: 36px; height: 36px; border-radius: 50%; border: 3px solid #fff; font-size: 18px; background: var(--c);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--c) 35%, transparent), 0 2px 8px rgba(0, 0, 0, 0.6);
+}
+.bcard.wide { grid-column: 1 / -1; }
+.bcard.central:not(.built) { border-color: var(--c); box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 40%, transparent); }
+.bcard.built { text-align: left; color: inherit; font: inherit; cursor: pointer; }
+.lvls { display: flex; flex-direction: column; gap: 6px; }
+.lvl { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
+.lvl .lnum {
+  width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 12px;
+  background: var(--panel-3); flex: none;
+}
+.lvl.done .lnum { background: #7950f2; color: #fff; }
+.lvl.next { border-color: #7950f2; }
+.tip { font-size: 12px; color: var(--muted); background: var(--panel-2); border-radius: 9px; padding: 8px 10px; margin-bottom: 12px; line-height: 1.4; }
+.pill.v-patrouille { background: #3b2f6b; color: #d0bfff; }
+.icon-btn.patrol:hover { background: #7950f2; border-color: #7950f2; }

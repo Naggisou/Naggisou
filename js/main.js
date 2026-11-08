@@ -144,7 +144,7 @@ function claim(id) {
   selectLayer.remove();
   selectLayer = null;
   startPlay();
-  toast(`Canton ${articleCanton(c.name)} revendiqué ! Construis ta première caserne.`, "ok");
+  toast(`Canton ${articleCanton(c.name)} revendiqué ! Commence par construire ta centrale d’engagement 📡.`, "ok");
 }
 
 // =====================================================================
@@ -158,10 +158,10 @@ const layers = {
   incidents: L.layerGroup(),
   vehicles: L.layerGroup(),
 };
-const markers = { stations: new Map(), vehicles: new Map(), incidents: new Map(), routes: new Map() };
+const markers = { stations: new Map(), vehicles: new Map(), incidents: new Map(), routes: new Map(), zones: new Map() };
 const ui = {
   tab: "interventions", view: null, build: null, speed: 3, checked: null, checkedFor: null,
-  filter: { inc: "all", veh: "all" }, othersOpen: false,
+  filter: { inc: "all", veh: "all" }, othersOpen: false, patrolPick: null,
 };
 let borderSegs = []; // tronçons de frontière nationale du canton
 let borderLayer = null;
@@ -205,6 +205,8 @@ function startPlay() {
   map.setMaxBounds(b.pad(0.6));
 
   for (const s of state.stations) addStationMarker(s);
+  if (state.central) addCentralMarker();
+  for (const v of state.vehicles) if (v.patrol) { drawPatrolZone(v); patrolLeg(v); }
   for (const i of state.incidents) addIncidentMarker(i);
 
   $hud.hidden = false;
@@ -297,9 +299,10 @@ function clearRouteLine(v) {
 // ---------- Construction ----------
 function setBuild(type) {
   ui.build = ui.build === type ? null : type;
+  ui.patrolPick = null;
   document.body.classList.toggle("map-building", !!ui.build);
   if (borderLayer) {
-    if (ui.build && G.STATION_TYPES[ui.build].borderOnly && borderSegs.length) {
+    if (ui.build && G.STATION_TYPES[ui.build]?.borderOnly && borderSegs.length) {
       borderLayer.addTo(map);
       map.flyToBounds(L.latLngBounds(borderSegs.flat().map(([x, y]) => [y, x])).pad(0.15), { duration: 0.6 });
     } else borderLayer.remove();
@@ -317,12 +320,15 @@ function nearestCommune(pt) {
 }
 
 map.on("click", async (e) => {
-  if (!state || !ui.build) return;
-  const typeId = ui.build;
-  const t = G.STATION_TYPES[typeId];
+  if (!state) return;
   const pt = [e.latlng.lng, e.latlng.lat];
+  if (ui.patrolPick) return pickPatrolZone(pt);
+  if (!ui.build) return;
+  const typeId = ui.build;
   if (!pointInGeometry(pt, cantonGeom)) return toast("Ce point est hors de ton canton.", "warn");
   if (inLake(pt)) return toast("Difficile de construire dans le lac…", "warn");
+  if (typeId === "central") return buildCentral(pt);
+  const t = G.STATION_TYPES[typeId];
   if (state.money < t.cost) return toast("Budget insuffisant.", "warn");
   if (t.borderOnly && distToSegmentsKm(pt, borderSegs) > G.BORDER_KM)
     return toast(`Un ${t.label.toLowerCase()} doit être à moins de ${G.BORDER_KM} km de la frontière nationale (zone verte).`, "warn");
@@ -343,9 +349,148 @@ map.on("click", async (e) => {
   addVehicle(s, t.starter);
   if (state.nextSpawnAt == null) state.nextSpawnAt = state.time + 45;
   G.save(state);
+  if (!state.central) toast("📡 Sans centrale d'engagement, aucun appel ne peut être reçu.", "warn");
   toast(`${t.icon} ${name} construit(e) (−${G.formatMoney(t.cost)}).`, "ok", { cat: typeId });
   renderPanel();
 });
+
+// ---------- Centrale d'engagement ----------
+async function buildCentral(pt) {
+  const cost = G.CENTRAL.levels[0].cost;
+  if (state.central) return toast("Tu as déjà une centrale.", "warn");
+  if (state.money < cost) return toast("Budget insuffisant.", "warn");
+  setBuild(null);
+  const snap = await snapToRoad(pt);
+  const pos = snap.distanceM < 400 && pointInGeometry(snap.pt, cantonGeom) ? snap.pt : pt;
+  state.money -= cost;
+  state.central = { pos, name: `Centrale ${nearestCommune(pos).name}`, level: 0 };
+  addCentralMarker();
+  if (state.nextSpawnAt == null || state.nextSpawnAt < state.time) state.nextSpawnAt = state.time + 45;
+  G.save(state);
+  toast(`📡 ${state.central.name} opérationnelle : les appels peuvent arriver !`, "ok");
+  if (!state.stations.length) toast("Construis maintenant une caserne, une base ou un poste pour répondre aux appels.");
+  renderPanel();
+}
+
+function upgradeCentral() {
+  const next = G.CENTRAL.levels[state.central.level + 1];
+  if (!next) return;
+  if (state.money < next.cost) return toast("Budget insuffisant.", "warn");
+  state.money -= next.cost;
+  state.central.level++;
+  G.save(state);
+  toast(`📡 Centrale améliorée : ${next.label} (${next.maxCalls} appels simultanés).`, "ok");
+  renderPanel();
+}
+
+const maxCalls = () => (state.central ? Math.min(G.MAX_OPEN_INCIDENTS, G.CENTRAL.levels[state.central.level].maxCalls) : 0);
+
+let centralMarker = null;
+function addCentralMarker() {
+  centralMarker?.remove();
+  const c = state.central;
+  centralMarker = L.marker([c.pos[1], c.pos[0]], {
+    icon: L.divIcon({
+      className: "",
+      html: `<div class="mk mk-central" style="--c:${G.CENTRAL.color}">${G.CENTRAL.icon}</div>`,
+      iconSize: [36, 36],
+      iconAnchor: [18, 18],
+    }),
+    zIndexOffset: 200,
+  })
+    .bindTooltip(() => esc(state.central.name))
+    .on("click", () => openView({ kind: "central" }))
+    .addTo(layers.stations);
+}
+
+// ---------- Patrouilles ----------
+function startPatrolPick(vid) {
+  ui.patrolPick = vid;
+  ui.build = null;
+  document.body.classList.add("map-building");
+  toast(`🚓 Clique sur la carte pour choisir la zone de patrouille de ${vehicle(vid).name} (Échap pour annuler).`);
+  renderPanel();
+}
+
+function cancelPatrolPick() {
+  ui.patrolPick = null;
+  document.body.classList.remove("map-building");
+  renderPanel();
+}
+
+function pickPatrolZone(pt) {
+  if (!pointInGeometry(pt, cantonGeom)) return toast("Zone hors de ton canton.", "warn");
+  const v = vehicle(ui.patrolPick);
+  cancelPatrolPick();
+  if (!v || !(v.status === "dispo" || v.status === "retour" || v.status === "patrouille")) return;
+  startPatrol(v, pt);
+}
+
+function startPatrol(v, center) {
+  v.patrol = { center };
+  drawPatrolZone(v);
+  toast(`🚓 ${v.name} part en patrouille.`, "", { cat: category(v) });
+  patrolLeg(v);
+}
+
+function drawPatrolZone(v) {
+  markers.zones.get(v.id)?.remove();
+  if (!v.patrol) return markers.zones.delete(v.id);
+  const [lon, lat] = v.patrol.center;
+  markers.zones.set(
+    v.id,
+    L.circle([lat, lon], {
+      radius: G.PATROL_RADIUS_KM * 1000, color: catColor(category(v)), weight: 1.5,
+      dashArray: "4 6", fillOpacity: 0.06, interactive: false,
+    }).addTo(layers.routes),
+  );
+}
+
+// Prochaine étape : un point au hasard dans la zone (sur la terre ferme, dans le canton)
+function patrolLeg(v) {
+  const [lon, lat] = v.patrol.center;
+  let dest = null;
+  for (let k = 0; k < 30 && !dest; k++) {
+    const r = G.PATROL_RADIUS_KM * Math.sqrt(Math.random());
+    const a = Math.random() * 2 * Math.PI;
+    const cand = [lon + (r * Math.cos(a)) / (111.32 * Math.cos((lat * Math.PI) / 180)), lat + (r * Math.sin(a)) / 110.57];
+    if (pointInGeometry(cand, cantonGeom) && !inLake(cand)) dest = cand;
+  }
+  v.status = "patrouille";
+  refreshVehicleMarker(v);
+  driveTo(v, dest ?? v.patrol.center, "patrol");
+}
+
+function endPatrol(v) {
+  v.patrol = null;
+  drawPatrolZone(v);
+}
+
+// Une patrouille peut tomber sur une infraction : intervention immédiate sur place
+function patrolDiscovery(v) {
+  const t = G.pickIncidentType(new Set([category(v)]), state, (t) =>
+    Object.keys(t.need).length === 1 && t.need[v.type] === 1,
+  );
+  if (!t || state.incidents.length >= G.MAX_OPEN_INCIDENTS) return;
+  v.trip = null;
+  v.tripToken = ++tripSeq;
+  clearRouteLine(v);
+  const i = {
+    id: G.uid(state, "I"), typeId: t.id, pt: v.pos.slice(), address: nearestCommune(v.pos).name,
+    createdAt: state.time, status: "engage", assigned: [v.id], workEnd: null, found: true,
+  };
+  v.status = "place";
+  v.incidentId = i.id;
+  state.incidents.push(i);
+  addIncidentMarker(i);
+  refreshVehicleMarker(v);
+  toast(`👁️ ${v.name} a constaté : ${t.label} (flagrant délit, prime +${Math.round((G.PATROL_BONUS - 1) * 100)} %)`, "call", { incident: i.id, cat: t.cat });
+  snapToRoad(i.pt).then((r) => {
+    if (r.street) i.address = `${r.street}, ${i.address}`;
+    dirty = true;
+  });
+  dirty = true;
+}
 
 function addVehicle(s, vtype) {
   const vt = G.VEHICLE_TYPES[vtype];
@@ -396,11 +541,12 @@ async function driveTo(v, dest, kind) {
     cum,
     total: Math.max(cum[cum.length - 1], 1e-6),
     start: state.time,
-    dur: Math.max(20, r.durationS * (kind === "incident" ? G.URGENT_FACTOR : 1)),
+    // urgence = plus rapide, patrouille = plus lent ; la météo ralentit tout le monde
+    dur: Math.max(20, (r.durationS * (kind === "incident" ? G.URGENT_FACTOR : kind === "patrol" ? 1.2 : 1)) / (G.WEATHER[state.weather?.id]?.drive ?? 1)),
     dest,
     offline: r.offline,
   };
-  v.status = kind === "incident" ? "route" : "retour";
+  v.status = { incident: "route", station: "retour", patrol: "patrouille" }[kind];
   if (r.offline) toast("Serveur d'itinéraires injoignable : trajet estimé en ligne droite.", "warn");
   setRouteLine(v);
   refreshVehicleMarker(v);
@@ -425,6 +571,7 @@ function positionOnTrip(trip, frac) {
 function sendHome(v) {
   const s = station(v.stationId);
   v.incidentId = null;
+  if (v.patrol) return patrolLeg(v); // après une intervention, la patrouille reprend
   if (haversineKm(v.pos, s.pos) < 0.03) {
     v.trip = null;
     v.tripToken = ++tripSeq;
@@ -445,6 +592,7 @@ function arrive(v) {
   v.trip = null;
   v.pos = trip.dest.slice();
   clearRouteLine(v);
+  if (trip.kind === "patrol") return patrolLeg(v);
   if (trip.kind === "incident") {
     const i = incident(v.incidentId);
     if (!i) return sendHome(v);
@@ -507,6 +655,7 @@ function detach(v) {
 
 function recall(vid) {
   const v = vehicle(vid);
+  endPatrol(v);
   detach(v);
   sendHome(v);
 }
@@ -535,7 +684,7 @@ function startWork(i, coverage) {
 function completeIncident(i) {
   const t = G.incidentType(i.typeId);
   const coverage = i.coverage ?? 1;
-  const reward = Math.round((t.reward * (0.4 + 0.6 * coverage)) / 100) * 100;
+  const reward = Math.round((t.reward * (0.4 + 0.6 * coverage) * (i.found ? G.PATROL_BONUS : 1)) / 100) * 100;
   state.money += reward;
   state.stats.done++;
   state.stats.earned += reward;
@@ -550,13 +699,15 @@ function completeIncident(i) {
 
 let spawning = false;
 async function spawnIncident() {
-  if (spawning || state.incidents.length >= G.MAX_OPEN_INCIDENTS) return;
+  // Sans centrale, personne ne décroche ; sa taille limite les appels traités en même temps
+  if (spawning || !state.central) return;
+  if (state.incidents.filter((i) => !i.found).length >= maxCalls()) return;
   // Pas de nouvel appel si tout le monde est occupé : au plus 1 appel en attente
-  // de plus que le nombre de véhicules libres (disponibles ou en retour).
-  const free = state.vehicles.filter((v) => v.status === "dispo" || v.status === "retour").length;
+  // de plus que le nombre de véhicules libres (disponibles, en retour ou en patrouille).
+  const free = state.vehicles.filter((v) => G.FREE_STATUSES.has(v.status)).length;
   const waiting = state.incidents.filter((i) => i.status === "nouveau").length;
   if (waiting >= free + 1) return;
-  const type = G.pickIncidentType(new Set(state.stations.map((s) => s.type)));
+  const type = G.pickIncidentType(new Set(state.stations.map((s) => s.type)), state);
   if (!type) return;
   spawning = true;
   try {
@@ -613,7 +764,19 @@ let last = performance.now();
 let lastUi = 0;
 let lastSave = 0;
 
-function step() {
+function step(dt) {
+  // Météo
+  if (!state.weather || state.time >= state.weather.until) {
+    const prev = state.weather?.id;
+    state.weather = G.nextWeather(state, prev);
+    const w = G.WEATHER[state.weather.id];
+    if (prev) toast(`${w.icon} Météo : ${w.label}${w.desc ? ` — ${w.desc}` : ""}`, "warn");
+  }
+
+  // Patrouilles : chance de tomber sur une infraction
+  for (const v of state.vehicles)
+    if (v.status === "patrouille" && Math.random() < dt / G.PATROL_DISCOVERY) patrolDiscovery(v);
+
   for (const v of state.vehicles) {
     if (!v.trip) continue;
     const frac = (state.time - v.trip.start) / v.trip.dur;
@@ -647,8 +810,8 @@ function step() {
     }
   }
 
-  if (state.stations.length && state.nextSpawnAt != null && state.time >= state.nextSpawnAt) {
-    state.nextSpawnAt = state.time + G.spawnInterval(canton.pop);
+  if (state.central && state.stations.length && state.nextSpawnAt != null && state.time >= state.nextSpawnAt) {
+    state.nextSpawnAt = state.time + G.spawnInterval(canton.pop, G.callRate(state));
     spawnIncident();
   }
 }
@@ -659,7 +822,7 @@ function tick(now) {
   last = now;
   if (ui.speed > 0) {
     state.time += dt * ui.speed;
-    step();
+    step(dt * ui.speed);
   }
   if (dirty) {
     dirty = false;
@@ -696,7 +859,19 @@ function updateHud() {
   }
   shownMoney = state.money;
   $m.textContent = G.formatMoney(state.money);
-  document.getElementById("hud-clock").textContent = G.formatClock(state.time);
+  const night = G.isNight(state.time);
+  const $c = document.getElementById("hud-clock");
+  $c.textContent = `${night ? "🌙" : "☀️"} ${G.formatClock(state.time)}`;
+  $c.title = `Jour ${G.dayNumber(state.time)}`;
+  const w = G.WEATHER[state.weather.id];
+  const $w = document.getElementById("hud-weather");
+  $w.textContent = `${night && w.night ? w.night : w.icon} ${G.temperature(state)}°C`;
+  $w.title = `${w.label}${w.desc ? " — " + w.desc : ""}\nTrajets : ${w.drive < 1 ? `ralentis (×${(1 / w.drive).toFixed(2)})` : "normaux"} · Appels : ×${G.callRate(state).toFixed(2)}`;
+  $w.dataset.w = state.weather.id;
+  // La carte s'assombrit la nuit
+  const d = G.daylight(state.time);
+  document.documentElement.style.setProperty("--daylight", d.toFixed(3));
+  document.body.classList.toggle("night", d < 0.5);
 }
 
 
@@ -718,6 +893,7 @@ function openView(view) {
     const i = incident(view.id);
     if (i) map.panTo([i.pt[1], i.pt[0]]);
   }
+  if (view?.kind === "central" && state.central) map.panTo([state.central.pos[1], state.central.pos[0]]);
   if (view?.kind === "station") {
     const s = station(view.id);
     if (s) map.panTo([s.pos[1], s.pos[0]]);
@@ -732,6 +908,7 @@ function renderPanel(resetScroll = false) {
   let html;
   if (ui.view?.kind === "incident" && incident(ui.view.id)) html = viewIncident(incident(ui.view.id));
   else if (ui.view?.kind === "station" && station(ui.view.id)) html = viewStation(station(ui.view.id));
+  else if (ui.view?.kind === "central" && state.central) html = viewCentral();
   else {
     ui.view = null;
     html = viewTabs();
@@ -744,7 +921,7 @@ function renderPanel(resetScroll = false) {
 function viewTabs() {
   const open = state.incidents.length;
   const waiting = state.incidents.filter((i) => i.status === "nouveau").length;
-  const free = state.vehicles.filter((v) => v.status === "dispo").length;
+  const free = state.vehicles.filter((v) => G.FREE_STATUSES.has(v.status)).length;
   const rate = state.stats.done + state.stats.missed
     ? Math.round((100 * state.stats.done) / (state.stats.done + state.stats.missed))
     : 100;
@@ -757,7 +934,7 @@ function viewTabs() {
   return `
     <div class="phead">
       <div class="kpis">
-        <div class="kpi"><b>${open}</b><span>appels ouverts</span></div>
+        <div class="kpi"><b>${open}<small>/${maxCalls()}</small></b><span>appels ouverts</span></div>
         <div class="kpi"><b>${free}<small>/${state.vehicles.length}</small></b><span>unités dispo</span></div>
         <div class="kpi"><b>${rate}<small>%</small></b><span>réussite</span></div>
       </div>
@@ -768,6 +945,7 @@ function viewTabs() {
         )
         .join("")}</nav>
     </div>
+    ${ui.patrolPick ? `<div class="hint pulse" style="margin:10px 14px 0">🚓 Clique sur la carte pour choisir la zone de patrouille de <b>${esc(vehicle(ui.patrolPick)?.name ?? "")}</b>. <kbd>Échap</kbd> pour annuler.</div>` : ""}
     <div class="pbody">${body}</div>`;
 }
 
@@ -790,6 +968,13 @@ function unitDots(i) {
 }
 
 function tabIncidents() {
+  if (!state.central)
+    return `<div class="empty">
+        <div class="big">📡</div>
+        <b>Aucune centrale d'engagement</b>
+        <p>Sans centrale, personne ne décroche le téléphone : construis-la en premier pour recevoir les appels 112 · 117 · 118 · 144.</p>
+        <button class="btn primary" data-action="tab" data-id="construire">Construire la centrale</button>
+      </div>`;
   if (!state.stations.length)
     return `<div class="empty">
         <div class="big">🏗️</div>
@@ -832,16 +1017,18 @@ function tabIncidents() {
 function vehicleRow(v, { recall = true } = {}) {
   const vt = G.VEHICLE_TYPES[v.type];
   const canRecall = recall && ["alerte", "route", "place"].includes(v.status);
+  const patrolNote = v.status === "patrouille" ? `Patrouille vers ${esc(nearestCommune(v.patrol?.center ?? v.pos).name)}` : null;
   const inc = v.incidentId && incident(v.incidentId);
   return `<div class="vrow" style="--c:${catColor(vt.category)}" data-hover="veh:${v.id}"
       ${inc ? `data-action="open-incident" data-id="${inc.id}"` : ""}>
     <span class="vbadge">${vt.short}</span>
     <span class="grow">
       <span class="title">${esc(v.name)}</span>
-      <span class="sub">${inc ? `→ ${esc(G.incidentType(inc.typeId).label)}` : vt.label} <span class="eta" data-eta="${v.id}"></span></span>
+      <span class="sub">${inc ? `→ ${esc(G.incidentType(inc.typeId).label)}` : patrolNote ?? vt.label} ${v.status === "patrouille" ? "" : `<span class="eta" data-eta="${v.id}"></span>`}</span>
     </span>
     <span class="pill v-${v.status}">${G.STATUS_LABEL[v.status]}</span>
-    ${canRecall ? `<button class="icon-btn" data-action="recall" data-id="${v.id}" title="Désengager et rentrer en caserne">↩</button>` : ""}
+    ${G.PATROL_TYPES.has(v.type) && ["dispo", "retour"].includes(v.status) ? `<button class="icon-btn patrol" data-action="patrol" data-id="${v.id}" title="Envoyer en patrouille">🚓</button>` : ""}
+    ${canRecall || v.status === "patrouille" ? `<button class="icon-btn" data-action="recall" data-id="${v.id}" title="${v.status === "patrouille" ? "Fin de patrouille, retour au poste" : "Désengager et rentrer en caserne"}">↩</button>` : ""}
   </div>`;
 }
 
@@ -852,12 +1039,16 @@ function tabVehicles() {
   for (const s of state.stations) counts[s.type] = (counts[s.type] ?? 0) + state.vehicles.filter((v) => v.stationId === s.id).length;
   const cats = Object.keys(G.CATEGORIES).filter((c) => counts[c]);
   if (ui.filter.veh !== "all" && !counts[ui.filter.veh]) ui.filter.veh = "all";
-  const busy = state.vehicles.filter((v) => v.status !== "dispo").length;
+  const patrolling = state.vehicles.filter((v) => v.status === "patrouille").length;
+  const busy = state.vehicles.filter((v) => v.status !== "dispo" && v.status !== "patrouille").length;
+  const canPatrol = state.vehicles.some((v) => G.PATROL_TYPES.has(v.type));
   return `
     <div class="summary">
-      <span><i class="dotc" style="--c:var(--ok)"></i>${state.vehicles.length - busy} disponibles</span>
+      <span><i class="dotc" style="--c:var(--ok)"></i>${state.vehicles.length - busy - patrolling} disponibles</span>
+      <span><i class="dotc" style="--c:#b197fc"></i>${patrolling} en patrouille</span>
       <span><i class="dotc" style="--c:var(--warn)"></i>${busy} en mission</span>
     </div>
+    ${canPatrol ? `<div class="tip">🚓 Envoie tes patrouilles (police, douane) sillonner une zone : elles restent alarmables, partent de plus près et peuvent tomber sur des flagrants délits (prime +25 %).</div>` : ""}
     ${cats.length > 1 ? filterChips("veh", cats, counts) : ""}
     ${state.stations
       .filter((s) => ui.filter.veh === "all" || s.type === ui.filter.veh)
@@ -878,21 +1069,45 @@ function tabVehicles() {
       .join("")}`;
 }
 
+function centralCard() {
+  const C = G.CENTRAL;
+  const c = state.central;
+  if (!c) {
+    const cost = C.levels[0].cost;
+    const active = ui.build === "central";
+    return `<div class="bcard wide central ${active ? "active" : ""}" style="--c:${C.color}">
+      <div class="btop"><span class="bicon">${C.icon}</span><span class="tag">ÉTAPE 1</span></div>
+      <div class="btitle">${C.label}</div>
+      <div class="bdesc">${C.desc} Traite ${C.levels[0].maxCalls} appels à la fois, améliorable.</div>
+      <div class="bfoot"><span class="price">${G.formatMoney(cost)}</span>
+        <button class="btn sm ${active ? "warn" : "primary"}" data-action="build" data-id="central" ${state.money < cost && !active ? "disabled" : ""}>${active ? "Annuler" : "Placer"}</button></div>
+    </div>`;
+  }
+  const lvl = C.levels[c.level];
+  const next = C.levels[c.level + 1];
+  return `<button class="bcard wide central built" style="--c:${C.color}" data-action="open-central">
+      <div class="btop"><span class="bicon">${C.icon}</span><span class="tag">Niv. ${c.level + 1}/${C.levels.length}</span></div>
+      <div class="btitle">${esc(c.name)}</div>
+      <div class="bdesc">${lvl.label} · ${lvl.maxCalls} appels simultanés${next ? ` · prochain niveau : ${next.maxCalls} appels (${G.formatMoney(next.cost)})` : " · niveau maximum"}</div>
+    </button>`;
+}
+
 function tabBuild() {
   const cards = Object.entries(G.STATION_TYPES)
     .map(([id, t]) => {
       const noBorder = t.borderOnly && !borderSegs.length;
+      const noCentral = !state.central;
       const poor = state.money < t.cost;
       const active = ui.build === id;
-      const why = noBorder ? "Pas de frontière nationale dans ce canton" : poor ? `Il manque ${G.formatMoney(t.cost - state.money)}` : "";
-      return `<div class="bcard ${active ? "active" : ""} ${noBorder || poor ? "locked" : ""}" style="--c:${t.color}">
+      const why = noCentral ? "🔒 Construis d'abord ta centrale" : noBorder ? "Pas de frontière nationale dans ce canton" : poor ? `Il manque ${G.formatMoney(t.cost - state.money)}` : "";
+      return `<div class="bcard ${active ? "active" : ""} ${noCentral || noBorder || poor ? "locked" : ""}" style="--c:${t.color}">
         <div class="btop"><span class="bicon">${t.icon}</span><span class="tag">${t.phone}</span></div>
         <div class="btitle">${t.label}</div>
         <div class="bdesc">${t.desc}</div>
         ${t.borderOnly ? `<div class="bnote">📍 Frontière nationale uniquement (≤ ${G.BORDER_KM} km)</div>` : ""}
         <div class="bfoot">
           <span class="price">${G.formatMoney(t.cost)}</span>
-          <button class="btn sm ${active ? "warn" : "primary"}" data-action="build" data-id="${id}" ${noBorder || (poor && !active) ? "disabled" : ""}>
+          <button class="btn sm ${active ? "warn" : "primary"}" data-action="build" data-id="${id}" ${noCentral || noBorder || (poor && !active) ? "disabled" : ""}>
             ${active ? "Annuler" : "Placer"}</button>
         </div>
         ${why ? `<div class="why">${why}</div>` : ""}
@@ -901,8 +1116,8 @@ function tabBuild() {
     .join("");
   const s = state.stats;
   return `
-    ${ui.build ? `<div class="hint pulse">🖱️ Clique sur la carte, dans ton canton${G.STATION_TYPES[ui.build].borderOnly ? ", <b>près de la frontière en vert</b>" : ""}, pour placer : <b>${G.STATION_TYPES[ui.build].label}</b>. <kbd>Échap</kbd> pour annuler.</div>` : ""}
-    <div class="bgrid">${cards}</div>
+    ${ui.build ? `<div class="hint pulse">🖱️ Clique sur la carte, dans ton canton${G.STATION_TYPES[ui.build]?.borderOnly ? ", <b>près de la frontière en vert</b>" : ""}, pour placer : <b>${(G.STATION_TYPES[ui.build] ?? G.CENTRAL).label}</b>. <kbd>Échap</kbd> pour annuler.</div>` : ""}
+    <div class="bgrid">${centralCard()}${cards}</div>
     <h3>Bilan</h3>
     <div class="grid2">
       <div class="stat"><b>${state.stations.length}</b><span>bâtiments</span></div>
@@ -918,6 +1133,44 @@ function tabBuild() {
     </div>
     <hr />
     <button class="btn sm danger" data-action="reset">Abandonner et changer de canton</button>`;
+}
+
+function viewCentral() {
+  const C = G.CENTRAL;
+  const c = state.central;
+  const open = state.incidents.filter((i) => !i.found).length;
+  const lvl = C.levels[c.level];
+  const levels = C.levels
+    .map((l, k) => {
+      const done = k <= c.level;
+      const isNext = k === c.level + 1;
+      return `<div class="lvl ${done ? "done" : ""} ${isNext ? "next" : ""}">
+        <span class="lnum">${done ? "✓" : k + 1}</span>
+        <span class="grow"><span class="title">${l.label}</span><span class="sub">${l.maxCalls} appels simultanés</span></span>
+        ${isNext ? `<button class="btn sm primary" data-action="upgrade-central" ${state.money < l.cost ? "disabled" : ""}>${G.formatMoney(l.cost)}</button>` : done ? "" : `<span class="muted small">${G.formatMoney(l.cost)}</span>`}
+      </div>`;
+    })
+    .join("");
+  const w = G.WEATHER[state.weather.id];
+  return `
+    <div class="banner" style="--c:${C.color}">
+      <button class="back" data-action="back">← Retour</button>
+      <div class="bn-row"><span class="bn-ico">${C.icon}</span>
+        <div><h2>${esc(c.name)}</h2><div class="bn-sub">${C.label} · ${lvl.label}</div></div></div>
+      <div class="cap"><span>Appels</span><span class="bar"><i style="width:${Math.min(100, (100 * open) / lvl.maxCalls)}%"></i></span><b>${open}/${lvl.maxCalls}</b></div>
+    </div>
+    <div class="pbody">
+      <h3>Situation</h3>
+      <div class="grid2">
+        <div class="stat"><b>${G.isNight(state.time) ? "🌙 Nuit" : "☀️ Jour"}</b><span>${G.formatClock(state.time)} · jour ${G.dayNumber(state.time)}</span></div>
+        <div class="stat"><b>${w.icon} ${G.temperature(state)}°C</b><span>${w.label}</span></div>
+        <div class="stat"><b>×${G.callRate(state).toFixed(2)}</b><span>activité des appels</span></div>
+        <div class="stat"><b>${w.drive < 1 ? `−${Math.round((1 - w.drive) * 100)} %` : "normale"}</b><span>vitesse des trajets</span></div>
+      </div>
+      ${w.desc ? `<div class="hint">${w.icon} ${w.desc}</div>` : ""}
+      <h3>Niveaux de la centrale</h3>
+      <div class="lvls">${levels}</div>
+    </div>`;
 }
 
 function viewStation(s) {
@@ -978,7 +1231,7 @@ function viewIncident(i) {
 
   // Véhicules disponibles (ou en retour) triés par distance à vol d'oiseau
   const available = state.vehicles
-    .filter((v) => v.status === "dispo" || v.status === "retour")
+    .filter((v) => G.FREE_STATUSES.has(v.status))
     .map((v) => ({ v, km: haversineKm(v.pos, i.pt) }))
     .sort((a, b) => a.km - b.km);
   // Véhicules engagés sur une autre intervention : on peut les rediriger ici
@@ -1006,7 +1259,7 @@ function viewIncident(i) {
       <input type="checkbox" data-check="${v.id}" ${ui.checked.has(v.id) ? "checked" : ""} />
       <span class="vbadge">${vt.short}</span>
       <span class="grow"><span class="title">${esc(v.name)}</span>
-        <span class="sub">${vt.label}${v.status === "retour" ? " · en retour" : ""}${inc ? ` · ${G.STATUS_LABEL[v.status].toLowerCase()} : ${esc(G.incidentType(inc.typeId).label)}` : ""}</span></span>
+        <span class="sub">${vt.label}${v.status === "retour" ? " · en retour" : ""}${v.status === "patrouille" ? " · 🚓 en patrouille" : ""}${inc ? ` · ${G.STATUS_LABEL[v.status].toLowerCase()} : ${esc(G.incidentType(inc.typeId).label)}` : ""}</span></span>
       <span class="km">${km.toFixed(1)} km</span>
       <span class="tick">✓</span>
     </label>`;
@@ -1169,6 +1422,9 @@ const actions = {
     renderPanel();
   },
   recall: (d) => recall(d.id),
+  patrol: (d) => startPatrolPick(d.id),
+  "open-central": () => openView({ kind: "central" }),
+  "upgrade-central": () => upgradeCentral(),
   cheat: (d) => {
     state.money += Number(d.amount);
     G.save(state);
@@ -1222,10 +1478,11 @@ document.addEventListener("keydown", (e) => {
       lastSpeed = ui.speed;
       setSpeed(0);
     } else setSpeed(lastSpeed);
-  } else if (["Digit1", "Digit2", "Digit3", "Digit4"].includes(e.code)) {
-    setSpeed([1, 3, 10, 30][Number(e.code.slice(-1)) - 1]);
+  } else if (["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"].includes(e.code)) {
+    setSpeed([1, 3, 10, 30, 60][Number(e.code.slice(-1)) - 1]);
   } else if (e.key === "Escape") {
-    if (ui.build) setBuild(null);
+    if (ui.patrolPick) cancelPatrolPick();
+    else if (ui.build) setBuild(null);
     else if (ui.view) openView(null);
   }
 });

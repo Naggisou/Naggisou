@@ -31,6 +31,13 @@ calcul d'itinéraires OSRM.
   chimique, commandement, transport de personnel), ambulance, SMUR, patrouille.
 - Si les moyens sont insuffisants, les équipes sur place travaillent quand même (plus lentement,
   récompense réduite) : les appels ne restent jamais bloqués.
+- **Centrale d'engagement** à construire en premier : sans elle, aucun appel. 4 niveaux
+  (4 → 8 → 14 → 25 appels simultanés).
+- **Patrouilles** (police, douane) : choisis une zone sur la carte, le véhicule la sillonne, reste
+  alarmable et peut constater des flagrants délits (prime +25 %).
+- **Temps** : jours de la semaine, cycle jour/nuit (carte assombrie la nuit, plus de bagarres et de
+  tapage la nuit, accidents aux heures de pointe, moins d'appels au petit matin) et **météo**
+  (soleil, pluie, orage, neige, brouillard, canicule) qui modifie les appels et ralentit les trajets.
 - **Douane (OFDF)** : poste de douane constructible uniquement à ≤ 2,5 km de la frontière nationale
   terrestre (zone verte affichée en mode construction), avec patrouille douanière, équipe cynophile,
   bus de contrôle et ses propres appels (contrebande, poids lourd suspect, stupéfiants…) le long de la frontière.

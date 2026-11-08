@@ -433,7 +433,9 @@ function dispatch(i, ids) {
   let n = 0;
   for (const vid of ids) {
     const v = vehicle(vid);
-    if (!v || !(v.status === "dispo" || v.status === "retour")) continue;
+    if (!v || v.incidentId === i.id) continue;
+    // Véhicule engagé ailleurs : on le désengage de son intervention et on le redirige
+    if (v.incidentId) detach(v);
     v.status = "alerte";
     v.incidentId = i.id;
     v.trip = null;
@@ -452,21 +454,31 @@ function dispatch(i, ids) {
   dirty = true;
 }
 
-function recall(vid) {
-  const v = vehicle(vid);
+// Retire un véhicule de son intervention (sans le déplacer)
+function detach(v) {
   const i = v.incidentId && incident(v.incidentId);
+  v.incidentId = null;
   if (i) {
-    i.assigned = i.assigned.filter((x) => x !== vid);
-    if (!i.assigned.length && i.status === "engage") i.status = "nouveau";
+    i.assigned = i.assigned.filter((x) => x !== v.id);
+    if (!i.assigned.length && i.status === "engage") {
+      i.status = "nouveau";
+      i.waitingSince = state.time;
+    }
     if (i.status === "travail") {
       const cov = G.coverageOnScene(state, i);
       if (cov <= 0) {
         i.status = i.assigned.length ? "engage" : "nouveau";
+        i.waitingSince = state.time;
         i.workEnd = null;
       } else i.coverage = Math.min(i.coverage ?? 1, cov);
     }
     refreshIncidentMarker(i);
   }
+}
+
+function recall(vid) {
+  const v = vehicle(vid);
+  detach(v);
   sendHome(v);
 }
 
@@ -509,6 +521,11 @@ function completeIncident(i) {
 let spawning = false;
 async function spawnIncident() {
   if (spawning || state.incidents.length >= G.MAX_OPEN_INCIDENTS) return;
+  // Pas de nouvel appel si tout le monde est occupé : au plus 1 appel en attente
+  // de plus que le nombre de véhicules libres (disponibles ou en retour).
+  const free = state.vehicles.filter((v) => v.status === "dispo" || v.status === "retour").length;
+  const waiting = state.incidents.filter((i) => i.status === "nouveau").length;
+  if (waiting >= free + 1) return;
   const type = G.pickIncidentType(new Set(state.stations.map((s) => s.type)));
   if (!type) return;
   spawning = true;
@@ -582,7 +599,7 @@ function step() {
       dirty = true;
     } else if (i.status === "travail" && state.time >= i.workEnd) {
       completeIncident(i);
-    } else if (i.status === "nouveau" && state.time - i.createdAt > G.UNATTENDED_TIMEOUT) {
+    } else if (i.status === "nouveau" && state.time - (i.waitingSince ?? i.createdAt) > G.UNATTENDED_TIMEOUT) {
       state.stats.missed++;
       toast(`✖ Appel sans réponse : ${G.incidentType(i.typeId).label} (${i.address})`, "warn");
       removeIncident(i);
@@ -804,6 +821,12 @@ function renderIncident(i) {
     .map((v) => ({ v, km: haversineKm(v.pos, i.pt) }))
     .sort((a, b) => a.km - b.km);
 
+  // Véhicules engagés sur une autre intervention : on peut les rediriger ici
+  const busy = state.vehicles
+    .filter((v) => v.incidentId && v.incidentId !== i.id && G.isUseful(t.need, v.type))
+    .map((v) => ({ v, km: haversineKm(v.pos, i.pt) }))
+    .sort((a, b) => a.km - b.km);
+
   // Proposition automatique : les plus proches qui couvrent les besoins manquants
   if (ui.checkedFor !== i.id || !ui.checked) {
     ui.checkedFor = i.id;
@@ -828,7 +851,7 @@ function renderIncident(i) {
   }
 
   // retire de la sélection les véhicules partis ailleurs entre-temps
-  const availIds = new Set(available.map(({ v }) => v.id));
+  const availIds = new Set([...available, ...busy].map(({ v }) => v.id));
   for (const id of ui.checked) if (!availIds.has(id)) ui.checked.delete(id);
 
   const missingNow = G.missingUnits(state, i);
@@ -839,7 +862,9 @@ function renderIncident(i) {
       <input type="checkbox" data-check="${v.id}" ${ui.checked.has(v.id) ? "checked" : ""} />
       <span class="dot" style="background:${catColor(category(v))}"></span>
       <span class="grow"><span class="title">${esc(v.name)}</span>
-      <span class="sub">${G.VEHICLE_TYPES[v.type].label} · ~${km.toFixed(1)} km${v.status === "retour" ? " · en retour" : ""}</span></span>
+      <span class="sub">${G.VEHICLE_TYPES[v.type].label} · ~${km.toFixed(1)} km${v.status === "retour" ? " · en retour" : ""}${
+        v.incidentId ? ` · ${G.STATUS_LABEL[v.status].toLowerCase()} : ${esc(G.incidentType(incident(v.incidentId)?.typeId)?.label ?? "")}` : ""
+      }</span></span>
     </label>`;
 
   $panel.innerHTML = `
@@ -859,6 +884,13 @@ function renderIncident(i) {
         ? `<div class="list">${relevant.map(row).join("")}</div>
            ${others.length ? `<details style="margin-top:8px"><summary class="small muted">Autres véhicules (${others.length})</summary><div class="list" style="margin-top:6px">${others.map(row).join("")}</div></details>` : ""}`
         : `<p class="muted small">Aucun véhicule disponible.</p>`
+    }
+    ${
+      busy.length
+        ? `<h3>Engagés ailleurs (redirection)</h3>
+           <p class="small muted" style="margin:-4px 0 8px">Coche un véhicule pour le désengager de son intervention et l'envoyer ici.</p>
+           <div class="list">${busy.map(row).join("")}</div>`
+        : ""
     }
     ${
       Object.keys(uncoverable).length
